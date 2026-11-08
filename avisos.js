@@ -8,6 +8,91 @@ const URL = 'https://max-ws.web.app/';
 const TOKEN_RUIM = /registration-token-not-registered|invalid-registration-token|invalid-argument|mismatched-credential/;
 
 const slotOf = t => Math.floor((t % 864e5) / STEP);  // 0..287, em UTC (igual ao app)
+
+// frases das mensagens do dia (uma diferente por dia, para cada período)
+const FRASES = {
+  bd: [
+    'Disciplina é escolher o que você quer mais, não o que quer agora.',
+    'Pequenos passos todos os dias vencem grandes planos adiados.',
+    'Hoje é um bom dia para cumprir o que você prometeu a si mesmo.',
+    'Comece pelo mais simples. O resto vem no embalo.',
+    'Seu eu do futuro agradece cada hábito de hoje.',
+    'Não espere vontade. Comece e a vontade aparece.',
+    'Um dia de cada vez, um hábito de cada vez.',
+    'Acordar e cumprir: é assim que se constrói uma vida nova.',
+    'Quem se supera hoje domina o amanhã.',
+    'A sua sequência começa com a primeira coisa que você faz hoje.',
+    'Constância é o superpoder de quem não desiste.',
+    'O dia é seu. Faça ele valer a pena.',
+    'Você não precisa ser o melhor, precisa ser melhor que ontem.',
+    'Levanta, faz e confia no processo.'
+  ],
+  bt: [
+    'Metade do dia já foi. A outra metade é a sua chance.',
+    'Ainda dá tempo de fazer o dia de hoje contar.',
+    'Consistência supera intensidade.',
+    'Não precisa ser perfeito, precisa ser constante.',
+    'Pausa rápida, respira e volta com tudo.',
+    'Cada hábito concluído é um tijolo na sua nova versão.',
+    'Foco no processo. O resultado vem.',
+    'Feito é melhor que perfeito.',
+    'A tarde também é lugar de vitória.',
+    'Quem continua quando cansa é quem chega lá.',
+    'Seu objetivo não tira folga. Nem você.',
+    'Mais um passo agora vale mais que dez amanhã.',
+    'Ninguém vê o esforço de hoje, mas todo mundo vê o resultado depois.',
+    'Termine o que começou. Você consegue.'
+  ],
+  bn: [
+    'Descansar também faz parte da evolução.',
+    'Amanhã é uma nova chance de ser constante.',
+    'Orgulhe-se de cada passo dado hoje.',
+    'O sono de quem cumpriu o dia é o melhor sono.',
+    'Errou hoje? Amanhã você recomeça mais forte.',
+    'Cada dia cumprido é um degrau a mais.',
+    'Desligue a tela, recarregue as energias e volte com tudo.',
+    'A disciplina de hoje é a liberdade de amanhã.',
+    'Você é feito do que repete todos os dias.',
+    'Agradeça pelo dia e prepare o de amanhã.',
+    'Grandes mudanças são feitas de dias comuns bem vividos.',
+    'Boa noite. Amanhã a sequência continua.',
+    'Quem planeja a noite ganha a manhã.',
+    'Você foi mais longe hoje do que imagina.'
+  ]
+};
+const fraseDo = (tipo, hoje) => {
+  const L = FRASES[tipo], [y, m, d] = hoje.split('-').map(Number);
+  return L[Math.floor(Date.UTC(y, m - 1, d) / 864e5) % L.length];
+};
+const primeiroNome = n => String(n || '').trim().split(/\s+/)[0].slice(0, 20);
+
+// texto das mensagens de bom dia, boa tarde e boa noite
+function saudacao(id, S, hoje, feitosN, total) {
+  const nome = primeiroNome(S.name), oi = nome ? ', ' + nome : '';
+  if (id === '_bd') {
+    return {
+      title: '☀️ Bom dia' + oi + '! Bora evoluir 💪',
+      body: (total ? `Hoje são ${total} ${total === 1 ? 'hábito' : 'hábitos'} te esperando. ` : '') + fraseDo('bd', hoje)
+    };
+  }
+  if (id === '_bt') {
+    const st = !total ? '' : feitosN >= total ? `Você já fez todos os ${total} hábitos de hoje! 🏆 ` : `Você já fez ${feitosN} de ${total} hábitos. Bora completar! `;
+    return { title: '🌤️ Boa tarde' + oi + '!', body: st + fraseDo('bt', hoje) };
+  }
+  const st = !total ? '' : feitosN >= total ? `Dia completo: ${total} de ${total} hábitos! 🔥 ` : `Hoje você fez ${feitosN} de ${total} hábitos. `;
+  return { title: '🌙 Boa noite' + oi + '!', body: st + fraseDo('bn', hoje) };
+}
+
+// aviso para quem não abriu o app no dia (null = abriu hoje, não manda)
+function sumiu(S, hoje, tz, now) {
+  if (S.vis && diaLocal(tz, S.vis) === hoje) return null;
+  const nome = primeiroNome(S.name), dias = S.vis ? Math.floor((now - S.vis) / 864e5) : 0;
+  return {
+    title: '📲 ' + (nome ? nome + ', b' : 'B') + 'ora ter disciplina em dia!',
+    body: (dias >= 2 ? `Faz ${dias} dias que você não aparece. ` : 'Você ainda não abriu o MAXWS hoje. ') +
+      'Marque seus hábitos e tenha mais foco nas suas finanças 💰'
+  };
+}
 function diaLocal(tz, t) {
   try {
     return new Intl.DateTimeFormat('en-CA', { timeZone: tz || 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t));
@@ -57,10 +142,17 @@ async function run(deps) {
       const us = await db.doc('users/' + uid).get(); lidos++;
       if (!us.exists) continue;
       const S = us.data() || {}, hoje = diaLocal(p.tz, now), feitos = (S.logs || {})[hoje] || [], habs = S.habits || [];
-      const pend = habs.filter(h => !feitos.includes(h.id) && (!h.c || h.c <= hoje));
+      const ativos = habs.filter(h => !h.c || h.c <= hoje);
+      const pend = ativos.filter(h => !feitos.includes(h.id));
       for (const it of itens) {
         try {
-          if (it.id === '_dia') {
+          if (it.id === '_bd' || it.id === '_bt' || it.id === '_bn') {
+            const m = saudacao(it.id, S, hoje, ativos.length - pend.length, ativos.length);
+            enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws' + it.id);
+          } else if (it.id === '_ina') {
+            const m = sumiu(S, hoje, p.tz, now);
+            if (m) enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws-sumiu');
+          } else if (it.id === '_dia') {
             if (!pend.length) continue;
             const n = pend.length;
             enviados += await enviar(deps, uid, tokens, '🔥 Ainda dá tempo!', (n === 1 ? 'Falta 1 hábito' : `Faltam ${n} hábitos`) + ' hoje. Não quebre sua sequência!', 'maxws-dia');
@@ -97,7 +189,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg };
 }
 
-module.exports = { run, slotOf, diaLocal };
+module.exports = { run, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
