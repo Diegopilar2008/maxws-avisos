@@ -137,10 +137,40 @@ async function senhas({ db, auth }) {
   return n;
 }
 
+// aviso para todos (o dono escreve no painel; sai na hora ou no horário agendado)
+async function avisosTodos(deps) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  let total = 0;
+  try {
+    const q = await db.collection('avisos').where('st', '==', 'pend').get();
+    const prontos = q.docs.filter(d => +((d.data() || {}).at || 0) <= now + 60000);
+    if (!prontos.length) return 0;
+    const ps = await db.collection('push').get();
+    const alvos = ps.docs.map(d => [d.id, ((d.data() || {}).tk || []).filter(Boolean)]).filter(x => x[1].length);
+    for (const d of prontos) {
+      const a = d.data() || {};
+      await db.doc('avisos/' + d.id).set({ st: 'env' }, { merge: true });  // marca antes: nunca manda 2 vezes
+      let n = 0;
+      for (let i = 0; i < alvos.length; i += 10) {
+        const r = await Promise.all(alvos.slice(i, i + 10).map(([uid, tk]) =>
+          enviar(deps, uid, tk, String(a.ti || 'MAXWS').slice(0, 60), String(a.tx || '').slice(0, 180), 'maxws-aviso-' + d.id)
+            .catch(e => { console.log('falha no aviso para', uid, e && e.message); return 0; })));
+        n += r.reduce((x, y) => x + y, 0);
+      }
+      await db.doc('avisos/' + d.id).set({ st: 'ok', n, fim: Date.now() }, { merge: true });
+      total += n;
+    }
+  } catch (e) { console.log('falha no aviso para todos', e && e.message); }
+  if (total) console.log('MAXWS: aviso para todos enviado para', total, 'celulares');
+  return total;
+}
+
 async function run(deps) {
   const { db } = deps;
   const now = deps.now || Date.now();
   await senhas(deps);
+  await avisosTodos(deps);
   const metaRef = db.doc('meta/avisos');
   const ms = await metaRef.get();
   const meta = (ms.exists && ms.data()) || {};
@@ -208,7 +238,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg };
 }
 
-module.exports = { run, senhas, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, senhas, avisosTodos, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
