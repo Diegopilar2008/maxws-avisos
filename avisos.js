@@ -106,6 +106,7 @@ async function enviar({ fcm, db, FieldValue }, uid, tokens, title, body, tag) {
   const r = await fcm.sendEachForMulticast({
     tokens,
     webpush: {
+      headers: { Urgency: 'high', TTL: '86400' },
       notification: { title, body, icon: URL + 'icon-192.png', badge: URL + 'icon-192.png', tag, renotify: true },
       fcmOptions: { link: URL }
     }
