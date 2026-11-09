@@ -119,9 +119,28 @@ async function enviar({ fcm, db, FieldValue }, uid, tokens, title, body, tag) {
   return r.successCount || 0;
 }
 
+// senha nova pedida pelo dono no painel (conta com número ou e-mail que esqueceu a senha)
+async function senhas({ db, auth }) {
+  if (!auth) return 0;
+  let n = 0;
+  try {
+    const rs = await db.collection('resets').limit(20).get();
+    for (const d of rs.docs) {
+      const pw = String((d.data() || {}).pw || '');
+      try {
+        if (pw.length >= 6 && pw.length <= 64) { await auth.updateUser(d.id, { password: pw }); n++; }
+      } catch (e) { console.log('falha na senha nova', e && (e.code || e.message)); }
+      await db.doc('resets/' + d.id).delete();
+    }
+  } catch (e) { console.log('falha ao ler pedidos de senha', e && e.message); }
+  if (n) console.log('MAXWS: senhas novas aplicadas', n);
+  return n;
+}
+
 async function run(deps) {
   const { db } = deps;
   const now = deps.now || Date.now();
+  await senhas(deps);
   const metaRef = db.doc('meta/avisos');
   const ms = await metaRef.get();
   const meta = (ms.exists && ms.data()) || {};
@@ -189,15 +208,16 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg };
 }
 
-module.exports = { run, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, senhas, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
   const { getFirestore, FieldValue } = require('firebase-admin/firestore');
   const { getMessaging } = require('firebase-admin/messaging');
+  const { getAuth } = require('firebase-admin/auth');
   if (!process.env.FIREBASE_SA) { console.error('Falta o segredo FIREBASE_SA no GitHub.'); process.exit(1); }
   initializeApp({ credential: cert(JSON.parse(process.env.FIREBASE_SA)) });
-  run({ db: getFirestore(), fcm: getMessaging(), FieldValue })
+  run({ db: getFirestore(), fcm: getMessaging(), auth: getAuth(), FieldValue })
     .then(() => process.exit(0))
     .catch(e => { console.error(e); process.exit(1); });
 }
