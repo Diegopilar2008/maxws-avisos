@@ -167,6 +167,49 @@ async function avisosTodos(deps) {
   return total;
 }
 
+// prêmio do mês: lembra o dono no começo do mês e avisa os vencedores quando ele entrega
+const PRZ_INI = '2026-11';
+const MESES = ['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'];
+function mesAnterior(dia) {
+  const [y, m] = String(dia).split('-').map(Number);
+  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+}
+async function premioMes(deps, meta) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  let n = 0;
+  try {
+    const ant = mesAnterior(diaLocal('America/Sao_Paulo', now));
+    const ps = await db.doc('config/premio').get();
+    const P = (ps.exists && ps.data()) || {};
+    const upd = {};
+    const tokens = async id => { const pd = await db.doc('push/' + id).get(); return ((pd.exists && (pd.data() || {}).tk) || []).filter(Boolean); };
+    if (P.mes && Array.isArray(P.g) && meta.pw !== P.mes) {
+      for (const w of P.g.slice(0, 3)) {
+        const lugar = ['1º', '2º', '3º'][(w.p || 1) - 1] || 'top 3';
+        try {
+          n += await enviar(deps, w.id, await tokens(w.id), '🏆 Você ganhou o prêmio do mês!',
+            `Você ficou em ${lugar} no ranking de ${MESES[+P.mes.slice(5, 7) - 1] || P.mes} e ganhou 1 mês de Premium. Parabéns! ⭐`, 'maxws-premio');
+        } catch (e) { console.log('falha no aviso do prêmio', e && e.message); }
+      }
+      upd.pw = P.mes;
+    }
+    if (ant >= PRZ_INI && P.mes !== ant && meta.pl !== ant) {
+      const dq = await db.collection('premium').where('plan', '==', 'dono').limit(1).get();
+      const dono = dq.docs[0] && dq.docs[0].id;
+      if (dono) {
+        try {
+          n += await enviar(deps, dono, await tokens(dono), '🏆 O ranking de ' + (MESES[+ant.slice(5, 7) - 1] || ant) + ' fechou!',
+            'Toque para ver os 3 primeiros e entregar o prêmio no painel do dono.', 'maxws-premio-dono');
+        } catch (e) { console.log('falha no lembrete do prêmio', e && e.message); }
+      }
+      upd.pl = ant;
+    }
+    if (Object.keys(upd).length) { await db.doc('meta/avisos').set(upd, { merge: true }); Object.assign(meta, upd); }
+  } catch (e) { console.log('falha no prêmio do mês', e && e.message); }
+  return n;
+}
+
 async function run(deps) {
   const { db } = deps;
   const now = deps.now || Date.now();
@@ -175,6 +218,7 @@ async function run(deps) {
   const metaRef = db.doc('meta/avisos');
   const ms = await metaRef.get();
   const meta = (ms.exists && ms.data()) || {};
+  await premioMes(deps, meta);
   const atual = Math.floor(now / STEP) * STEP;
   let ultimo = typeof meta.ate === 'number' ? meta.ate : atual - STEP;
   if (atual - ultimo > MAX_ATRASO) ultimo = atual - MAX_ATRASO;
@@ -192,7 +236,9 @@ async function run(deps) {
       const us = await db.doc('users/' + uid).get(); lidos++;
       if (!us.exists) continue;
       const S = us.data() || {}, hoje = diaLocal(p.tz, now), feitos = (S.logs || {})[hoje] || [], habs = S.habits || [];
-      const ativos = habs.filter(h => !h.c || h.c <= hoje);
+      const dow = new Date(hoje + 'T12:00:00Z').getUTCDay();
+      const naData = h => !Array.isArray(h.d) || !h.d.length || h.d.length >= 7 || h.d.includes(dow);
+      const ativos = habs.filter(h => (!h.c || h.c <= hoje) && naData(h));
       const pend = ativos.filter(h => !feitos.includes(h.id));
       for (const it of itens) {
         try {
@@ -208,7 +254,7 @@ async function run(deps) {
             enviados += await enviar(deps, uid, tokens, '🔥 Ainda dá tempo!', (n === 1 ? 'Falta 1 hábito' : `Faltam ${n} hábitos`) + ' hoje. Não quebre sua sequência!', 'maxws-dia');
           } else {
             const h = habs.find(x => String(x.id) === String(it.id));
-            if (!h || feitos.includes(h.id)) continue;
+            if (!h || feitos.includes(h.id) || !naData(h)) continue;
             enviados += await enviar(deps, uid, tokens, '⏰ ' + (h.e ? h.e + ' ' : '') + h.n, 'Hora do seu hábito! Toque para marcar como feito.', 'maxws-' + h.id);
           }
         } catch (e) { console.log('falha ao enviar para', uid, e && e.message); }
@@ -239,7 +285,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg };
 }
 
-module.exports = { run, senhas, avisosTodos, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, senhas, avisosTodos, premioMes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
