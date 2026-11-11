@@ -239,10 +239,39 @@ async function indicacoes(deps) {
   return n;
 }
 
+// expulsar: apaga o login e os dados da pessoa que o dono expulsou (o bloqueio fica guardado)
+async function expulsoes(deps) {
+  const { db, auth } = deps;
+  let n = 0;
+  try {
+    const q = await db.collection('expulsos').limit(20).get();
+    for (const d of q.docs) {
+      const id = d.id;
+      if (auth) { try { await auth.deleteUser(id); } catch (e) { if (!/user-not-found/.test(String(e && e.code))) console.log('falha ao apagar login', e && e.code); } }
+      for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id]) { try { await db.doc(p).delete(); } catch (e) { } }
+      try {
+        const cs = await db.collection('clas').where('m', 'array-contains', id).get();
+        for (const c of cs.docs) {
+          const C = c.data() || {}, m = (C.m || []).filter(x => x !== id), nm = Object.assign({}, C.nm);
+          delete nm[id];
+          if (!m.length) await db.doc('clas/' + c.id).delete();
+          else await db.doc('clas/' + c.id).update({ m, nm, dono: C.dono === id ? m[0] : C.dono });
+        }
+      } catch (e) { console.log('falha ao tirar do clã', e && e.message); }
+      try { const os = await db.collection('ofp').where('uid', '==', id).get(); for (const o of os.docs) await db.doc('ofp/' + o.id).delete(); } catch (e) { }
+      await db.doc('expulsos/' + id).delete();
+      n++;
+    }
+  } catch (e) { console.log('falha nas expulsões', e && e.message); }
+  if (n) console.log('MAXWS: contas expulsas', n);
+  return n;
+}
+
 async function run(deps) {
   const { db } = deps;
   const now = deps.now || Date.now();
   await senhas(deps);
+  await expulsoes(deps);
   await indicacoes(deps);
   await avisosTodos(deps);
   const metaRef = db.doc('meta/avisos');
@@ -321,7 +350,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg };
 }
 
-module.exports = { run, senhas, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
