@@ -210,10 +210,40 @@ async function premioMes(deps, meta) {
   return n;
 }
 
+// indique um amigo: depois de 3 dias de uso do amigo, os dois ganham 7 dias de Premium
+async function indicacoes(deps) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  let n = 0;
+  try {
+    const q = await db.collection('refs').where('st', '==', 'pend').get();
+    for (const r of q.docs) {
+      const R = r.data() || {};
+      const u = await db.doc('users/' + r.id).get();
+      const logs = (u.exists && (u.data() || {}).logs) || {};
+      if (Object.keys(logs).filter(k => (logs[k] || []).length).length < 3) continue;
+      for (const id of [R.by, r.id]) {
+        if (!id) continue;
+        const ps = await db.doc('premium/' + id).get();
+        const p = (ps.exists && ps.data()) || null;
+        if (p && (p.plan === 'dono' || (p.plan === 'fundador' && !p.until))) continue;
+        const on = p && (p.tier || 'premium') === 'premium' && p.until && p.until > now;
+        await db.doc('premium/' + id).set({ tier: 'premium', plan: on ? (p.plan || 'mensal') : 'bonus', until: (on ? p.until : now) + 7 * 864e5, name: String((p && p.name) || (id === r.id ? R.name : '') || '').slice(0, 40), t: now }, { merge: true });
+        const pd = await db.doc('push/' + id).get();
+        const tk = ((pd.exists && (pd.data() || {}).tk) || []).filter(Boolean);
+        try { n += await enviar(deps, id, tk, '🎁 Você ganhou 7 dias de Premium!', id === r.id ? 'Presente da sua indicação no MAXWS. Aproveite! ⭐' : 'Seu amigo ' + String(R.name || '').slice(0, 30) + ' já está firme no MAXWS. Valeu por indicar! ⭐', 'maxws-ref'); } catch (e) { console.log('falha aviso indicação', e && e.message); }
+      }
+      await db.doc('refs/' + r.id).set({ st: 'ok' }, { merge: true });
+    }
+  } catch (e) { console.log('falha nas indicações', e && e.message); }
+  return n;
+}
+
 async function run(deps) {
   const { db } = deps;
   const now = deps.now || Date.now();
   await senhas(deps);
+  await indicacoes(deps);
   await avisosTodos(deps);
   const metaRef = db.doc('meta/avisos');
   const ms = await metaRef.get();
@@ -245,6 +275,12 @@ async function run(deps) {
           if (it.id === '_bd' || it.id === '_bt' || it.id === '_bn') {
             const m = saudacao(it.id, S, hoje, ativos.length - pend.length, ativos.length);
             enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws' + it.id);
+          } else if (String(it.id).startsWith('_dk')) {
+            const D = S.dark || {};
+            if (D.st !== 'on' || !pend.length) continue;
+            const n = pend.length;
+            enviados += await enviar(deps, uid, tokens, '🖤 Você jurou. Levanta e cumpre.',
+              (n === 1 ? 'Falta 1 hábito' : `Faltam ${n} hábitos`) + ` hoje. O toque de recolher é às ${D.rec || '23:00'}.`, 'maxws-dark');
           } else if (it.id === '_ina') {
             const m = sumiu(S, hoje, p.tz, now);
             if (m) enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws-sumiu');
@@ -285,7 +321,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg };
 }
 
-module.exports = { run, senhas, avisosTodos, premioMes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, senhas, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
