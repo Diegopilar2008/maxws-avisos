@@ -101,6 +101,7 @@ function diaLocal(tz, t) {
   }
 }
 
+let ERRS = {};  // falhas de envio da rodada (aparecem no painel do dono)
 async function enviar({ fcm, db, FieldValue }, uid, tokens, title, body, tag) {
   if (!tokens.length) return 0;
   const r = await fcm.sendEachForMulticast({
@@ -112,7 +113,12 @@ async function enviar({ fcm, db, FieldValue }, uid, tokens, title, body, tag) {
     }
   });
   const ruins = [];
-  (r.responses || []).forEach((x, i) => { if (!x.success && TOKEN_RUIM.test(String(x.error && x.error.code))) ruins.push(tokens[i]); });
+  (r.responses || []).forEach((x, i) => {
+    if (x.success) return;
+    const c = String((x.error && x.error.code) || 'erro');
+    ERRS[c] = (ERRS[c] || 0) + 1;
+    if (TOKEN_RUIM.test(c)) ruins.push(tokens[i]);
+  });
   if (ruins.length) {
     await db.doc('push/' + uid).set({ tk: FieldValue.arrayRemove(...ruins) }, { merge: true });
     ruins.forEach(t => { const i = tokens.indexOf(t); if (i >= 0) tokens.splice(i, 1); });
@@ -152,9 +158,10 @@ async function avisosTodos(deps) {
     for (const d of prontos) {
       const a = d.data() || {};
       await db.doc('avisos/' + d.id).set({ st: 'env' }, { merge: true });  // marca antes: nunca manda 2 vezes
+      const para = a.so ? alvos.filter(x => x[0] === a.so) : alvos;  // "so": teste só no celular do dono
       let n = 0;
-      for (let i = 0; i < alvos.length; i += 10) {
-        const r = await Promise.all(alvos.slice(i, i + 10).map(([uid, tk]) =>
+      for (let i = 0; i < para.length; i += 10) {
+        const r = await Promise.all(para.slice(i, i + 10).map(([uid, tk]) =>
           enviar(deps, uid, tk, String(a.ti || 'MAXWS').slice(0, 60), String(a.tx || '').slice(0, 180), 'maxws-aviso-' + d.id)
             .catch(e => { console.log('falha no aviso para', uid, e && e.message); return 0; })));
         n += r.reduce((x, y) => x + y, 0);
@@ -270,10 +277,11 @@ async function expulsoes(deps) {
 async function run(deps) {
   const { db } = deps;
   const now = deps.now || Date.now();
+  ERRS = {};
   await senhas(deps);
   await expulsoes(deps);
   await indicacoes(deps);
-  await avisosTodos(deps);
+  const na = await avisosTodos(deps);
   const metaRef = db.doc('meta/avisos');
   const ms = await metaRef.get();
   const meta = (ms.exists && ms.data()) || {};
@@ -345,9 +353,10 @@ async function run(deps) {
     }
   }
 
-  await metaRef.set({ ate: atual, sg, t: now, n: enviados }, { merge: true });
-  console.log(`MAXWS: fatias ${slots.length}, contas lidas ${lidos}, notificações enviadas ${enviados}`);
-  return { slots, enviados, lidos, ate: atual, sg };
+  await metaRef.set({ ate: atual, sg, t: now, n: enviados + na, err: ERRS }, { merge: true });
+  console.log(`MAXWS: fatias ${slots.length}, contas lidas ${lidos}, notificações enviadas ${enviados + na}`);
+  if (Object.keys(ERRS).length) console.log('MAXWS: falhas de envio', JSON.stringify(ERRS));
+  return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
 module.exports = { run, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
