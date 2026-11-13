@@ -255,12 +255,16 @@ async function testes(deps, meta) {
   if (typeof meta.tr !== 'number') { meta.tr = now; return 0; }  // primeira vez: só contas novas daqui para frente
   let ate = meta.tr;
   try {
+    const cs = await db.doc('config/teste').get();
+    const C = (cs.exists && cs.data()) || {};
+    if (!C.on) { meta.tr = now; return 0; }  // o dono não ligou o teste grátis
+    const dentro = t => t >= (+C.ini || 0) && (!C.ate || t <= +C.ate);
     const q = await db.collection('signups').where('t', '>', meta.tr - 10 * 60000).get();
     for (const d of q.docs) {
       const s = d.data() || {}, t = +s.t || 0;
       if (!t) continue;
       ate = Math.max(ate, Math.min(t, now));
-      if (now - t > TESTE_DIAS * 864e5) continue;
+      if (now - t > TESTE_DIAS * 864e5 || !dentro(t)) continue;
       const ps = await db.doc('premium/' + d.id).get();
       if (ps.exists) continue;  // já tem plano (pago, bônus, dono, bloqueado ou teste antigo)
       await db.doc('premium/' + d.id).set({ tier: 'premium', plan: 'teste', until: t + TESTE_DIAS * 864e5, name: String(s.name || '').slice(0, 40), t: now, src: 'teste' });
