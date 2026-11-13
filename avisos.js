@@ -102,6 +102,14 @@ function diaLocal(tz, t) {
 }
 
 let ERRS = {};  // falhas de envio da rodada (aparecem no painel do dono)
+// dono principal e sócios (todos recebem os avisos de dono)
+async function donosIds(db) {
+  const ids = [];
+  for (const pl of ['dono', 'socio']) {
+    try { const q = await db.collection('premium').where('plan', '==', pl).limit(5).get(); ids.push(...q.docs.map(d => d.id)); } catch (e) { /* segue */ }
+  }
+  return [...new Set(ids)];
+}
 async function enviar({ fcm, db, FieldValue }, uid, tokens, title, body, tag) {
   if (!tokens.length) return 0;
   const r = await fcm.sendEachForMulticast({
@@ -202,9 +210,7 @@ async function premioMes(deps, meta) {
       upd.pw = P.mes;
     }
     if (ant >= PRZ_INI && P.mes !== ant && meta.pl !== ant) {
-      const dq = await db.collection('premium').where('plan', '==', 'dono').limit(1).get();
-      const dono = dq.docs[0] && dq.docs[0].id;
-      if (dono) {
+      for (const dono of await donosIds(db)) {
         try {
           n += await enviar(deps, dono, await tokens(dono), '🏆 O ranking de ' + (MESES[+ant.slice(5, 7) - 1] || ant) + ' fechou!',
             'Toque para ver os 3 primeiros e entregar o prêmio no painel do dono.', 'maxws-premio-dono');
@@ -233,7 +239,7 @@ async function indicacoes(deps) {
         if (!id) continue;
         const ps = await db.doc('premium/' + id).get();
         const p = (ps.exists && ps.data()) || null;
-        if (p && (p.plan === 'dono' || (p.plan === 'fundador' && !p.until))) continue;
+        if (p && (p.plan === 'dono' || p.plan === 'socio' || (p.plan === 'fundador' && !p.until))) continue;
         const on = p && (p.tier || 'premium') === 'premium' && p.until && p.until > now;
         await db.doc('premium/' + id).set({ tier: 'premium', plan: on ? (p.plan || 'mensal') : 'bonus', until: (on ? p.until : now) + 7 * 864e5, name: String((p && p.name) || (id === r.id ? R.name : '') || '').slice(0, 40), t: now }, { merge: true });
         const pd = await db.doc('push/' + id).get();
@@ -324,7 +330,7 @@ async function liberarCompra(deps, uid, venda, now) {
   const { db } = deps;
   const ps = await db.doc('premium/' + uid).get();
   const p = (ps.exists && ps.data()) || null;
-  if (p && (p.plan === 'dono' || p.kick || (p.plan === 'fundador' && !p.until))) return false;
+  if (p && (p.plan === 'dono' || p.plan === 'socio' || p.kick || (p.plan === 'fundador' && !p.until))) return false;
   const pago = +venda.pago || now;
   let until = null;
   if (venda.plan !== 'fundador') {
@@ -420,11 +426,9 @@ async function caktoSync(deps) {
   }
   if (avisos.length) {
     try {
-      const dq = await db.collection('premium').where('plan', '==', 'dono').limit(1).get();
-      const dono = dq.docs[0] && dq.docs[0].id;
-      if (dono) {
-        const title = avisos.length === 1 ? '💰 ' + avisos[0] : '💰 ' + avisos.length + ' novidades nas vendas';
-        await enviar(deps, dono, await tokensDe(db, dono), title.slice(0, 80), (avisos.length === 1 ? 'Toque para ver no painel do dono.' : avisos.slice(0, 3).join(' · ')).slice(0, 180), 'maxws-vendas');
+      const title = avisos.length === 1 ? '💰 ' + avisos[0] : '💰 ' + avisos.length + ' novidades nas vendas';
+      for (const dono of await donosIds(db)) {
+        try { await enviar(deps, dono, await tokensDe(db, dono), title.slice(0, 80), (avisos.length === 1 ? 'Toque para ver no painel do dono.' : avisos.slice(0, 3).join(' · ')).slice(0, 180), 'maxws-vendas'); } catch (e) { /* segue */ }
       }
     } catch (e) { console.log('falha aviso vendas', e && e.message); }
   }
@@ -532,13 +536,12 @@ async function run(deps) {
     const novos = await db.collection('signups').where('t', '>', meta.sg).get();
     if (novos.docs.length) {
       sg = Math.max(sg, ...novos.docs.map(x => +(x.data() || {}).t || 0));
-      const dq = await db.collection('premium').where('plan', '==', 'dono').limit(1).get();
-      const dono = dq.docs[0] && dq.docs[0].id;
-      const pd = dono ? await db.doc('push/' + dono).get() : null;
-      const tokens = ((pd && pd.exists && pd.data().tk) || []).filter(Boolean);
-      if (tokens.length) {
-        const nomes = novos.docs.map(x => String((x.data() || {}).name || 'Alguém').slice(0, 30));
-        const title = novos.docs.length === 1 ? '🆕 ' + nomes[0] + ' se cadastrou no MAXWS' : '🆕 ' + novos.docs.length + ' pessoas se cadastraram no MAXWS';
+      const nomes = novos.docs.map(x => String((x.data() || {}).name || 'Alguém').slice(0, 30));
+      const title = novos.docs.length === 1 ? '🆕 ' + nomes[0] + ' se cadastrou no MAXWS' : '🆕 ' + novos.docs.length + ' pessoas se cadastraram no MAXWS';
+      for (const dono of await donosIds(db)) {
+        const pd = await db.doc('push/' + dono).get();
+        const tokens = ((pd && pd.exists && pd.data().tk) || []).filter(Boolean);
+        if (!tokens.length) continue;
         try { enviados += await enviar(deps, dono, tokens, title, 'Toque para ver no painel do dono.', 'maxws-cadastro'); } catch (e) { console.log('falha aviso dono', e && e.message); }
       }
     }
