@@ -263,7 +263,7 @@ async function testes(deps, meta) {
   try {
     const cs = await db.doc('config/teste').get();
     const C = (cs.exists && cs.data()) || {};
-    if (!C.on) { meta.tr = now; return 0; }  // o dono não ligou o teste grátis
+    if (!C.ini) { meta.tr = now; return 0; }  // o dono nunca ligou o teste grátis
     const dentro = t => t >= (+C.ini || 0) && (!C.ate || t <= +C.ate);
     const q = await db.collection('signups').where('t', '>', meta.tr - 10 * 60000).get();
     for (const d of q.docs) {
