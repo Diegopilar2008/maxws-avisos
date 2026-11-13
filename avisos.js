@@ -439,6 +439,63 @@ async function caktoSync(deps) {
   return out;
 }
 
+// ---------- v41: 🗑️ a própria pessoa pediu para excluir a conta (Configurações → Privacidade) ----------
+async function limparConta(deps, id) {
+  const { db, auth } = deps;
+  if (auth) { try { await auth.deleteUser(id); } catch (e) { if (!/user-not-found/.test(String(e && e.code))) console.log('falha ao apagar login', e && e.code); } }
+  for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id]) { try { await db.doc(p).delete(); } catch (e) { /* segue */ } }
+  try {
+    const cs = await db.collection('clas').where('m', 'array-contains', id).get();
+    for (const c of cs.docs) {
+      const C = c.data() || {}, m = (C.m || []).filter(x => x !== id), nm = Object.assign({}, C.nm);
+      delete nm[id];
+      if (!m.length) await db.doc('clas/' + c.id).delete();
+      else await db.doc('clas/' + c.id).update({ m, nm, dono: C.dono === id ? m[0] : C.dono });
+    }
+  } catch (e) { console.log('falha ao tirar do clã', e && e.message); }
+  try { const os = await db.collection('ofp').where('uid', '==', id).get(); for (const o of os.docs) await db.doc('ofp/' + o.id).delete(); } catch (e) { /* segue */ }
+}
+async function exclusoes(deps) {
+  const { db } = deps;
+  let n = 0;
+  try {
+    const q = await db.collection('exclusoes').limit(20).get();
+    for (const d of q.docs) {
+      const id = d.id;
+      const ps = await db.doc('premium/' + id).get();
+      const p = (ps.exists && ps.data()) || null;
+      if (p && (p.plan === 'dono' || p.plan === 'socio')) { await db.doc('exclusoes/' + id).delete(); continue; }  // conta de dono não se exclui por aqui
+      await limparConta(deps, id);
+      if (p && !p.kick) { try { await db.doc('premium/' + id).delete(); } catch (e) { /* segue */ } }  // expulso continua bloqueado
+      await db.doc('exclusoes/' + id).delete();
+      n++;
+    }
+  } catch (e) { console.log('falha nas exclusões', e && e.message); }
+  if (n) console.log('MAXWS: contas excluídas a pedido', n);
+  return n;
+}
+
+// ---------- v41: ⏳ aviso um dia antes do fim do teste grátis ----------
+async function fimTeste(deps) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  let n = 0;
+  try {
+    const q = await db.collection('premium').where('until', '>', now + 12 * 3600000).where('until', '<=', now + 36 * 3600000).get();
+    for (const d of q.docs) {
+      const p = d.data() || {};
+      if (p.plan !== 'teste' || p.av1) continue;
+      await db.doc('premium/' + d.id).set({ av1: true }, { merge: true });  // marca antes: nunca manda 2 vezes
+      try {
+        n += await enviar(deps, d.id, await tokensDe(db, d.id), '⏳ Seu Premium grátis acaba amanhã',
+          'Continue com tudo liberado no MAXWS e não perca seu ritmo. Toque para ver os planos ⭐', 'maxws-fimteste');
+      } catch (e) { console.log('falha aviso fim do teste', e && e.message); }
+    }
+  } catch (e) { console.log('falha no fim do teste', e && e.message); }
+  if (n) console.log('MAXWS: aviso de fim do teste para', n);
+  return n;
+}
+
 // expulsar: apaga o login e os dados da pessoa que o dono expulsou (o bloqueio fica guardado)
 async function expulsoes(deps) {
   const { db, auth } = deps;
@@ -473,6 +530,7 @@ async function run(deps) {
   ERRS = {};
   await senhas(deps);
   await expulsoes(deps);
+  await exclusoes(deps);
   await indicacoes(deps);
   const na = await avisosTodos(deps);
   const metaRef = db.doc('meta/avisos');
@@ -480,6 +538,7 @@ async function run(deps) {
   const meta = (ms.exists && ms.data()) || {};
   await premioMes(deps, meta);
   await testes(deps, meta);
+  await fimTeste(deps);
   try { await caktoSync(deps); } catch (e) { console.log('falha na Cakto', e && e.message); }
   const atual = Math.floor(now / STEP) * STEP;
   let ultimo = typeof meta.ate === 'number' ? meta.ate : atual - STEP;
@@ -553,7 +612,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { run, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, exclusoes, fimTeste, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
