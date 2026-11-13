@@ -246,6 +246,191 @@ async function indicacoes(deps) {
   return n;
 }
 
+// ---------- v38: 🎁 7 dias de Premium grátis para quem cria conta ----------
+const TESTE_DIAS = 7;
+async function testes(deps, meta) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  let n = 0;
+  if (typeof meta.tr !== 'number') { meta.tr = now; return 0; }  // primeira vez: só contas novas daqui para frente
+  let ate = meta.tr;
+  try {
+    const q = await db.collection('signups').where('t', '>', meta.tr - 10 * 60000).get();
+    for (const d of q.docs) {
+      const s = d.data() || {}, t = +s.t || 0;
+      if (!t) continue;
+      ate = Math.max(ate, Math.min(t, now));
+      if (now - t > TESTE_DIAS * 864e5) continue;
+      const ps = await db.doc('premium/' + d.id).get();
+      if (ps.exists) continue;  // já tem plano (pago, bônus, dono, bloqueado ou teste antigo)
+      await db.doc('premium/' + d.id).set({ tier: 'premium', plan: 'teste', until: t + TESTE_DIAS * 864e5, name: String(s.name || '').slice(0, 40), t: now, src: 'teste' });
+      n++;
+    }
+  } catch (e) { console.log('falha no teste grátis', e && e.message); }
+  meta.tr = ate;
+  if (n) console.log('MAXWS: teste grátis liberado para', n);
+  return n;
+}
+
+// ---------- v38: 💰 vendas da Cakto -> Premium liberado sozinho ----------
+const CK_API = 'https://api.cakto.com.br/public_api/';
+const emOf = v => String(v || '').trim().toLowerCase();
+// mensal (33 dias, dá folga para a renovação), anual (366 dias) ou vitalício
+function planoDaVenda(o) {
+  const nome = String((o.product && o.product.name) || '');
+  const amt = parseFloat(o.amount || o.baseAmount || 0) || 0;
+  const per = +o.subscription_period || 0;
+  if (/vital[ií]cio|fundador/i.test(nome) || (o.type === 'unique' && amt >= 100)) return ['fundador', 0];
+  if (per >= 300 || per === 12 || /anual/i.test(nome) || amt >= 60) return ['anual', 366];
+  return ['mensal', 33];
+}
+const ckErr = (msg, code) => Object.assign(new Error(msg), { ck: code });
+async function ckToken(deps, cfg, now) {
+  const { db } = deps, f = deps.fetch || fetch;
+  const ts = await db.doc('dono/caktotk').get();
+  const T = (ts.exists && ts.data()) || {};
+  if (T.tk && T.id === cfg.id && T.exp > now + 120000) return T.tk;  // reaproveita (o token vale 10 horas)
+  const r = await f(CK_API + 'token/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: cfg.id, client_secret: cfg.sec }).toString()
+  });
+  if (r.status === 400 || r.status === 401 || r.status === 403) throw ckErr('token ' + r.status, 'chave inválida');
+  if (!r.ok) throw ckErr('token ' + r.status, 'Cakto respondeu ' + r.status);
+  const k = await r.json();
+  if (!k || !k.access_token) throw ckErr('sem token', 'chave inválida');
+  await db.doc('dono/caktotk').set({ tk: k.access_token, exp: now + (+k.expires_in || 36000) * 1000, id: cfg.id });
+  return k.access_token;
+}
+async function uidDoEmail(deps, email) {
+  const { db, auth } = deps;
+  if (!email) return null;
+  if (auth) { try { const u = await auth.getUserByEmail(email); if (u && u.uid) return u.uid; } catch (e) { /* sem login com esse e-mail */ } }
+  for (const [col, campo] of [['signups', 'email'], ['users', 'mail']]) {
+    try { const q = await db.collection(col).where(campo, '==', email).limit(1).get(); if (q.docs.length) return q.docs[0].id; } catch (e) { /* segue */ }
+  }
+  return null;
+}
+async function tokensDe(db, id) {
+  const pd = await db.doc('push/' + id).get();
+  return ((pd.exists && (pd.data() || {}).tk) || []).filter(Boolean);
+}
+// libera o Premium da compra; não mexe em dono, vitalício ou expulso. Devolve true se liberou.
+async function liberarCompra(deps, uid, venda, now) {
+  const { db } = deps;
+  const ps = await db.doc('premium/' + uid).get();
+  const p = (ps.exists && ps.data()) || null;
+  if (p && (p.plan === 'dono' || p.kick || (p.plan === 'fundador' && !p.until))) return false;
+  const pago = +venda.pago || now;
+  let until = null;
+  if (venda.plan !== 'fundador') {
+    const atual = p && (p.tier || 'premium') === 'premium' && p.plan !== 'teste' && p.until ? +p.until : 0;
+    until = Math.max(atual, pago + venda.dias * 864e5);
+    if (until <= now) return false;  // venda antiga já vencida
+  }
+  await db.doc('premium/' + uid).set({ tier: 'premium', plan: venda.plan, until, name: String(venda.name || (p && p.name) || '').slice(0, 40), t: now, src: 'cakto', ord: String(venda.id) });
+  return true;
+}
+async function caktoSync(deps) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  const f = deps.fetch || fetch;
+  const cs = await db.doc('dono/cakto').get();
+  const cfg = (cs.exists && cs.data()) || {};
+  if (!cfg.id || !cfg.sec) return null;
+  const mr = await db.doc('meta/cakto').get();
+  const M = (mr.exists && mr.data()) || {};
+  const primeira = typeof M.cur !== 'number';
+  const out = { t: now, n: 0, novas: 0, err: '' };
+  const avisos = [];
+  try {
+    const tk = await ckToken(deps, cfg, now);
+    const desde = primeira ? now - 30 * 864e5 : M.cur - 15 * 60000;
+    let campo = 'updatedAt__gte';
+    let url = CK_API + 'orders/?status=paid,refunded,chargedback&' + campo + '=' + encodeURIComponent(new Date(desde).toISOString()) + '&ordering=paidAt&limit=50';
+    const pedidos = [];
+    for (let pg = 0; url && pg < 10; pg++) {
+      let r = await f(url, { headers: { Authorization: 'Bearer ' + tk } });
+      if (r.status === 400 && pg === 0 && campo === 'updatedAt__gte') {
+        campo = 'paidAt__gte'; url = url.replace('updatedAt__gte', 'paidAt__gte');
+        r = await f(url, { headers: { Authorization: 'Bearer ' + tk } });
+      }
+      if (r.status === 401 || r.status === 403) { try { await db.doc('dono/caktotk').delete(); } catch (e) { /* ok */ } throw ckErr('pedidos ' + r.status, 'chave inválida'); }
+      if (!r.ok) throw ckErr('pedidos ' + r.status, 'Cakto respondeu ' + r.status);
+      const k = await r.json();
+      pedidos.push(...((k && k.results) || []));
+      url = (k && k.next) || null;
+    }
+    for (const o of pedidos) {
+      const id = String(o.id || o.refId || '');
+      if (!id) continue;
+      const st = String(o.status || '');
+      const ref = db.doc('pagos/' + id);
+      const ant = await ref.get();
+      const A = (ant.exists && ant.data()) || null;
+      if (A && A.st === st && (A.uid || st !== 'paid')) continue;  // já tratado
+      const [plan, dias] = planoDaVenda(o);
+      const email = emOf(o.customer && o.customer.email);
+      const name = String((o.customer && o.customer.name) || '').slice(0, 40);
+      const pago = Date.parse(o.paidAt || o.createdAt || '') || now;
+      const uid = (A && A.uid) || await uidDoEmail(deps, email);
+      let ok = false;
+      if (st === 'paid' && uid) ok = await liberarCompra(deps, uid, { id, plan, dias, pago, name }, now);
+      if (st !== 'paid' && uid) {
+        const ps = await db.doc('premium/' + uid).get();
+        const p = (ps.exists && ps.data()) || null;
+        if (p && p.src === 'cakto' && String(p.ord) === id) await db.doc('premium/' + uid).set({ until: now, t: now }, { merge: true });
+      }
+      await ref.set({ st, email, name, plan, dias, uid: uid || null, ok, pago, amt: String(o.amount || ''), t: now });
+      if (!A) out.novas++;
+      if (ok) {
+        out.n++;
+        try { await enviar(deps, uid, await tokensDe(db, uid), '⭐ Seu Premium foi liberado!', 'Obrigado pela compra! Tudo do MAXWS está liberado. Bora evoluir 💜', 'maxws-premium'); } catch (e) { /* ok */ }
+      }
+      if (!primeira) {
+        if (st === 'paid' && !A) avisos.push(ok ? 'Venda nova: ' + (name || email) + ' · Premium ' + (plan === 'fundador' ? 'vitalício' : plan) + ' ✅' : (name || email) + ' pagou, mas não tem conta com ' + email);
+        if (st !== 'paid' && (!A || A.st !== st)) avisos.push((st === 'refunded' ? 'Reembolso: ' : 'Contestação: ') + (name || email));
+      }
+    }
+    // quem pagou antes de criar a conta: tenta de novo a cada rodada
+    const pq = await db.collection('pagos').where('uid', '==', null).limit(20).get();
+    for (const d of pq.docs) {
+      const x = d.data() || {};
+      if (x.st !== 'paid' || now - (+x.pago || 0) > 40 * 864e5) continue;
+      const uid = await uidDoEmail(deps, x.email);
+      if (!uid) continue;
+      const ok = await liberarCompra(deps, uid, { id: d.id, plan: x.plan || 'mensal', dias: +x.dias || 33, pago: +x.pago || now, name: x.name }, now);
+      await db.doc('pagos/' + d.id).set({ uid, ok, t: now }, { merge: true });
+      if (ok) {
+        out.n++;
+        avisos.push((x.name || x.email) + ' criou a conta: Premium liberado ✅');
+        try { await enviar(deps, uid, await tokensDe(db, uid), '⭐ Seu Premium foi liberado!', 'Obrigado pela compra! Tudo do MAXWS está liberado. Bora evoluir 💜', 'maxws-premium'); } catch (e) { /* ok */ }
+      }
+    }
+    if (primeira) avisos.push('Liberação automática ligada' + (out.n ? ': ' + out.n + ' liberado' + (out.n === 1 ? '' : 's') : ''));
+    out.cur = now;
+  } catch (e) {
+    out.err = (e && e.ck) || 'sem conexão com a Cakto';
+    out.cur = typeof M.cur === 'number' ? M.cur : undefined;
+    console.log('MAXWS: Cakto', out.err, e && e.message);
+  }
+  if (avisos.length) {
+    try {
+      const dq = await db.collection('premium').where('plan', '==', 'dono').limit(1).get();
+      const dono = dq.docs[0] && dq.docs[0].id;
+      if (dono) {
+        const title = avisos.length === 1 ? '💰 ' + avisos[0] : '💰 ' + avisos.length + ' novidades nas vendas';
+        await enviar(deps, dono, await tokensDe(db, dono), title.slice(0, 80), (avisos.length === 1 ? 'Toque para ver no painel do dono.' : avisos.slice(0, 3).join(' · ')).slice(0, 180), 'maxws-vendas');
+      }
+    } catch (e) { console.log('falha aviso vendas', e && e.message); }
+  }
+  const salvar = Object.assign({}, out);
+  if (salvar.cur === undefined) delete salvar.cur;
+  await db.doc('meta/cakto').set(salvar, { merge: true });
+  console.log(`MAXWS: Cakto ${out.err ? 'erro: ' + out.err : 'ok'} · vendas novas ${out.novas} · liberados ${out.n}`);
+  return out;
+}
+
 // expulsar: apaga o login e os dados da pessoa que o dono expulsou (o bloqueio fica guardado)
 async function expulsoes(deps) {
   const { db, auth } = deps;
@@ -286,6 +471,8 @@ async function run(deps) {
   const ms = await metaRef.get();
   const meta = (ms.exists && ms.data()) || {};
   await premioMes(deps, meta);
+  await testes(deps, meta);
+  try { await caktoSync(deps); } catch (e) { console.log('falha na Cakto', e && e.message); }
   const atual = Math.floor(now / STEP) * STEP;
   let ultimo = typeof meta.ate === 'number' ? meta.ate : atual - STEP;
   if (atual - ultimo > MAX_ATRASO) ultimo = atual - MAX_ATRASO;
@@ -353,13 +540,13 @@ async function run(deps) {
     }
   }
 
-  await metaRef.set({ ate: atual, sg, t: now, n: enviados + na, err: ERRS }, { merge: true });
+  await metaRef.set({ ate: atual, sg, tr: meta.tr, t: now, n: enviados + na, err: ERRS }, { merge: true });
   console.log(`MAXWS: fatias ${slots.length}, contas lidas ${lidos}, notificações enviadas ${enviados + na}`);
   if (Object.keys(ERRS).length) console.log('MAXWS: falhas de envio', JSON.stringify(ERRS));
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { run, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
