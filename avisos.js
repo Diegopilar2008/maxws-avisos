@@ -291,8 +291,8 @@ function planoDaVenda(o) {
   const amt = parseFloat(o.amount || o.baseAmount || 0) || 0;
   const per = +o.subscription_period || 0;
   if (/vital[ií]cio|fundador/i.test(nome) || (o.type === 'unique' && amt >= 100)) return ['fundador', 0];
-  if (per >= 300 || per === 12 || /anual/i.test(nome) || amt >= 60) return ['anual', 366];
-  return ['mensal', 33];
+  if (per >= 300 || per === 12 || /anual/i.test(nome) || amt >= 60) return ['anual', 365];
+  return ['mensal', 30];
 }
 const ckErr = (msg, code) => Object.assign(new Error(msg), { ck: code });
 async function ckToken(deps, cfg, now) {
@@ -334,8 +334,10 @@ async function liberarCompra(deps, uid, venda, now) {
   const pago = +venda.pago || now;
   let until = null;
   if (venda.plan !== 'fundador') {
-    const atual = p && (p.tier || 'premium') === 'premium' && p.plan !== 'teste' && p.until ? +p.until : 0;
-    until = Math.max(atual, pago + venda.dias * 864e5);
+    const mesma = p && p.src === 'cakto' && String(p.ord) === String(venda.id);
+    if (mesma && +p.until > now) return true;  // esse pedido já foi liberado: não soma de novo
+    const atual = p && !mesma && (p.tier || 'premium') === 'premium' && p.plan !== 'teste' && p.until ? +p.until : 0;
+    until = Math.max(atual, pago) + venda.dias * 864e5;
     if (until <= now) return false;  // venda antiga já vencida
   }
   await db.doc('premium/' + uid).set({ tier: 'premium', plan: venda.plan, until, name: String(venda.name || (p && p.name) || '').slice(0, 40), t: now, src: 'cakto', ord: String(venda.id) });
@@ -409,7 +411,7 @@ async function caktoSync(deps) {
       if (x.st !== 'paid' || now - (+x.pago || 0) > 40 * 864e5) continue;
       const uid = await uidDoEmail(deps, x.email);
       if (!uid) continue;
-      const ok = await liberarCompra(deps, uid, { id: d.id, plan: x.plan || 'mensal', dias: +x.dias || 33, pago: +x.pago || now, name: x.name }, now);
+      const ok = await liberarCompra(deps, uid, { id: d.id, plan: x.plan || 'mensal', dias: +x.dias || 30, pago: +x.pago || now, name: x.name }, now);
       await db.doc('pagos/' + d.id).set({ uid, ok, t: now }, { merge: true });
       if (ok) {
         out.n++;
@@ -496,6 +498,46 @@ async function fimTeste(deps) {
   return n;
 }
 
+// ---------- v42: ⏳ avisos do fim do Premium pago (3 dias antes, 1 dia antes e quando acaba) ----------
+// Cada aviso sai uma vez só para cada data de fim (campos aw3, aw1 e awx guardam a data avisada).
+// Quando a pessoa renova, a data de fim muda e os avisos voltam a valer para o novo período.
+async function fimPremium(deps) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  const H = 3600000;
+  let n = 0;
+  try {
+    const q = await db.collection('premium').where('until', '>', now - 48 * H).where('until', '<=', now + 84 * H).get();
+    for (const d of q.docs) {
+      const p = d.data() || {};
+      if (p.plan !== 'mensal' && p.plan !== 'anual') continue;  // teste, vitalício, dono e sócio ficam de fora
+      if ((p.tier || 'premium') !== 'premium' || p.kick) continue;
+      const u = +p.until;
+      const falta = u - now;
+      let k = '', title = '', body = '';
+      if (falta > 60 * H) {
+        if (p.aw3 === u) continue;
+        k = 'aw3'; title = '⏳ Seu Premium acaba em 3 dias';
+        body = 'Renove agora e continue com tudo liberado no MAXWS. Os dias que faltam são somados ⭐';
+      } else if (falta > 12 * H && falta <= 36 * H) {
+        if (p.aw1 === u) continue;
+        k = 'aw1'; title = '⏳ Seu Premium acaba amanhã';
+        body = 'Renove para não perder seus recursos Premium. Toque para renovar ⭐';
+      } else if (falta <= 0) {
+        if (p.awx === u) continue;
+        k = 'awx'; title = 'Seu Premium acabou 😢';
+        body = 'Sua conta voltou para o plano Básico. Renove e libere tudo de novo no MAXWS ⭐';
+      } else continue;
+      await db.doc('premium/' + d.id).set({ [k]: u }, { merge: true });  // marca antes: nunca manda 2 vezes
+      try {
+        n += await enviar(deps, d.id, await tokensDe(db, d.id), title, body, 'maxws-fimprem');
+      } catch (e) { console.log('falha aviso fim do Premium', e && e.message); }
+    }
+  } catch (e) { console.log('falha no fim do Premium', e && e.message); }
+  if (n) console.log('MAXWS: avisos de fim do Premium', n);
+  return n;
+}
+
 // expulsar: apaga o login e os dados da pessoa que o dono expulsou (o bloqueio fica guardado)
 async function expulsoes(deps) {
   const { db, auth } = deps;
@@ -539,6 +581,7 @@ async function run(deps) {
   await premioMes(deps, meta);
   await testes(deps, meta);
   await fimTeste(deps);
+  await fimPremium(deps);
   try { await caktoSync(deps); } catch (e) { console.log('falha na Cakto', e && e.message); }
   const atual = Math.floor(now / STEP) * STEP;
   let ultimo = typeof meta.ate === 'number' ? meta.ate : atual - STEP;
@@ -612,7 +655,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { run, exclusoes, fimTeste, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
