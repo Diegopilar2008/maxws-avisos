@@ -445,7 +445,7 @@ async function caktoSync(deps) {
 async function limparConta(deps, id) {
   const { db, auth } = deps;
   if (auth) { try { await auth.deleteUser(id); } catch (e) { if (!/user-not-found/.test(String(e && e.code))) console.log('falha ao apagar login', e && e.code); } }
-  for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id]) { try { await db.doc(p).delete(); } catch (e) { /* segue */ } }
+  for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'opinioes/' + id]) { try { await db.doc(p).delete(); } catch (e) { /* segue */ } }
   try {
     const cs = await db.collection('clas').where('m', 'array-contains', id).get();
     for (const c of cs.docs) {
