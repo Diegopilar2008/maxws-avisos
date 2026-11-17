@@ -446,6 +446,7 @@ async function limparConta(deps, id) {
   const { db, auth } = deps;
   if (auth) { try { await auth.deleteUser(id); } catch (e) { if (!/user-not-found/.test(String(e && e.code))) console.log('falha ao apagar login', e && e.code); } }
   for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'opinioes/' + id, 'resumo/' + id]) { try { await db.doc(p).delete(); } catch (e) { /* segue */ } }
+  await tiraParcerias(db, id);
   try {
     const cs = await db.collection('clas').where('m', 'array-contains', id).get();
     for (const c of cs.docs) {
@@ -548,6 +549,7 @@ async function expulsoes(deps) {
       const id = d.id;
       if (auth) { try { await auth.deleteUser(id); } catch (e) { if (!/user-not-found/.test(String(e && e.code))) console.log('falha ao apagar login', e && e.code); } }
       for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'resumo/' + id]) { try { await db.doc(p).delete(); } catch (e) { } }
+      await tiraParcerias(db, id);
       try {
         const cs = await db.collection('clas').where('m', 'array-contains', id).get();
         for (const c of cs.docs) {
@@ -563,6 +565,57 @@ async function expulsoes(deps) {
     }
   } catch (e) { console.log('falha nas expulsões', e && e.message); }
   if (n) console.log('MAXWS: contas expulsas', n);
+  return n;
+}
+
+// ---------- v47: 🤝 parceiro de disciplina ----------
+// Avisa quem convidou quando o amigo aceita e manda as cutucadas (uma por dia de cada um).
+async function tiraParcerias(db, id) {
+  for (const campo of ['a', 'b']) {
+    try { const q = await db.collection('parcs').where(campo, '==', id).get(); for (const d of q.docs) await db.doc('parcs/' + d.id).delete(); } catch (e) { /* segue */ }
+  }
+}
+async function parcerias(deps) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  let n = 0;
+  try {
+    const q = await db.collection('parcs').where('st', '==', 'on').where('av', '==', false).get();
+    for (const d of q.docs) {
+      const p = d.data() || {};
+      if (p.st !== 'on' || p.av !== false || !p.a || !p.b) continue;
+      await db.doc('parcs/' + d.id).set({ av: true }, { merge: true });  // marca antes: nunca manda 2 vezes
+      const nome = String(p.bn || 'Seu amigo').trim().split(' ')[0].slice(0, 20) || 'Seu amigo';
+      try {
+        n += await enviar(deps, p.a, await tokensDe(db, p.a), '🤝 ' + nome + ' aceitou ser seu parceiro de disciplina!',
+          'Agora vocês veem o progresso um do outro. Bora manter a dupla em dia 🔥', 'maxws-parc');
+      } catch (e) { console.log('falha aviso parceria', e && e.message); }
+    }
+  } catch (e) { console.log('falha nas parcerias', e && e.message); }
+  try {
+    const q = await db.collection('cutucar').where('ok', '==', false).get();
+    for (const d of q.docs) {
+      const c = d.data() || {};
+      if (c.ok !== false) continue;
+      if (+c.t < now - 2 * 864e5) { await db.doc('cutucar/' + d.id).set({ ok: true, s: 0 }, { merge: true }); continue; }  // velha demais
+      await db.doc('cutucar/' + d.id).set({ ok: true, s: now }, { merge: true });
+      const ps = await db.doc('parcs/' + c.pid).get();
+      const p = (ps.exists && ps.data()) || {};
+      const juntos = p.st === 'on' && ((p.a === c.de && p.b === c.para) || (p.b === c.de && p.a === c.para));
+      if (!juntos) continue;
+      const nome = String(c.n || 'Seu parceiro').trim().split(' ')[0].slice(0, 20) || 'Seu parceiro';
+      try {
+        n += await enviar(deps, c.para, await tokensDe(db, c.para), '👊 ' + nome + ' te cutucou!',
+          'Seu parceiro de disciplina está esperando. Bora marcar seus hábitos hoje 💪', 'maxws-cutucar');
+      } catch (e) { console.log('falha na cutucada', e && e.message); }
+    }
+  } catch (e) { console.log('falha nas cutucadas', e && e.message); }
+  // limpeza: cutucadas com mais de 3 dias
+  try {
+    const q = await db.collection('cutucar').where('t', '<', now - 3 * 864e5).limit(200).get();
+    for (const d of q.docs) if (+((d.data() || {}).t) < now - 3 * 864e5) await db.doc('cutucar/' + d.id).delete();
+  } catch (e) { /* segue */ }
+  if (n) console.log('MAXWS: avisos de parceria e cutucadas', n);
   return n;
 }
 
@@ -641,6 +694,7 @@ async function run(deps) {
   await fimTeste(deps);
   await fimPremium(deps);
   const nr = await resumoSemana(deps, meta);
+  const np = await parcerias(deps);
   try { await caktoSync(deps); } catch (e) { console.log('falha na Cakto', e && e.message); }
   const atual = Math.floor(now / STEP) * STEP;
   let ultimo = typeof meta.ate === 'number' ? meta.ate : atual - STEP;
@@ -708,13 +762,13 @@ async function run(deps) {
     }
   }
 
-  await metaRef.set({ ate: atual, sg, tr: meta.tr, t: now, n: enviados + na + nr, err: ERRS }, { merge: true });
+  await metaRef.set({ ate: atual, sg, tr: meta.tr, t: now, n: enviados + na + nr + np, err: ERRS }, { merge: true });
   console.log(`MAXWS: fatias ${slots.length}, contas lidas ${lidos}, notificações enviadas ${enviados + na}`);
   if (Object.keys(ERRS).length) console.log('MAXWS: falhas de envio', JSON.stringify(ERRS));
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { run, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
