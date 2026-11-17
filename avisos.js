@@ -110,14 +110,14 @@ async function donosIds(db) {
   }
   return [...new Set(ids)];
 }
-async function enviar({ fcm, db, FieldValue }, uid, tokens, title, body, tag) {
+async function enviar({ fcm, db, FieldValue }, uid, tokens, title, body, tag, link) {
   if (!tokens.length) return 0;
   const r = await fcm.sendEachForMulticast({
     tokens,
     webpush: {
       headers: { Urgency: 'high', TTL: '86400' },
       notification: { title, body, icon: URL + 'icon-192.png', badge: URL + 'icon-192.png', tag, renotify: true },
-      fcmOptions: { link: URL }
+      fcmOptions: { link: link || URL }
     }
   });
   const ruins = [];
@@ -445,7 +445,7 @@ async function caktoSync(deps) {
 async function limparConta(deps, id) {
   const { db, auth } = deps;
   if (auth) { try { await auth.deleteUser(id); } catch (e) { if (!/user-not-found/.test(String(e && e.code))) console.log('falha ao apagar login', e && e.code); } }
-  for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'opinioes/' + id]) { try { await db.doc(p).delete(); } catch (e) { /* segue */ } }
+  for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'opinioes/' + id, 'resumo/' + id]) { try { await db.doc(p).delete(); } catch (e) { /* segue */ } }
   try {
     const cs = await db.collection('clas').where('m', 'array-contains', id).get();
     for (const c of cs.docs) {
@@ -547,7 +547,7 @@ async function expulsoes(deps) {
     for (const d of q.docs) {
       const id = d.id;
       if (auth) { try { await auth.deleteUser(id); } catch (e) { if (!/user-not-found/.test(String(e && e.code))) console.log('falha ao apagar login', e && e.code); } }
-      for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id]) { try { await db.doc(p).delete(); } catch (e) { } }
+      for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'resumo/' + id]) { try { await db.doc(p).delete(); } catch (e) { } }
       try {
         const cs = await db.collection('clas').where('m', 'array-contains', id).get();
         for (const c of cs.docs) {
@@ -563,6 +563,64 @@ async function expulsoes(deps) {
     }
   } catch (e) { console.log('falha nas expulsões', e && e.message); }
   if (n) console.log('MAXWS: contas expulsas', n);
+  return n;
+}
+
+// ---------- v46: 📊 resumo da semana (domingo, 19h às 23h no horário da pessoa) ----------
+// Sai uma vez por semana para quem marcou hábito em pelo menos 1 dos últimos 7 dias.
+// O toque abre o app com ?card=semana, que mostra o card animado pronto para os Stories.
+function horaLocal(tz, t) {
+  const f = z => {
+    const p = {};
+    new Intl.DateTimeFormat('en-GB', { timeZone: z, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' })
+      .formatToParts(new Date(t)).forEach(x => { p[x.type] = x.value; });
+    const dia = `${p.year}-${p.month}-${p.day}`;
+    return { dia, h: +p.hour % 24, dow: new Date(dia + 'T12:00:00Z').getUTCDay() };
+  };
+  try { return f(tz || 'America/Sao_Paulo'); } catch (e) { return f('America/Sao_Paulo'); }
+}
+function diasAntes(dia, n) {
+  const d = new Date(dia + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+async function resumoSemana(deps, meta) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  meta = meta || {};
+  // só procura no domingo à noite (horário de Brasília, com folga para outros fusos) e no máximo a cada 20 minutos
+  const sp = horaLocal('America/Sao_Paulo', now);
+  const janela = (sp.dow === 0 && sp.h >= 17) || (sp.dow === 1 && sp.h < 2);
+  if (!janela) return 0;
+  if (typeof meta.rst === 'number' && now - meta.rst < 20 * 60000) return 0;
+  await db.doc('meta/avisos').set({ rst: now }, { merge: true });
+  let n = 0;
+  try {
+    const ps = await db.collection('push').get();
+    for (const d of ps.docs) {
+      const p = d.data() || {}, uid = d.id, tokens = (p.tk || []).filter(Boolean);
+      if (!tokens.length) continue;
+      const L = horaLocal(p.tz, now);
+      if (L.dow !== 0 || L.h < 19 || L.h >= 23) continue;
+      try {
+        const rf = db.doc('resumo/' + uid), rs = await rf.get();
+        if (rs.exists && (rs.data() || {}).w === L.dia) continue;
+        await rf.set({ w: L.dia, t: now });  // marca antes: nunca manda 2 vezes na mesma semana
+        const us = await db.doc('users/' + uid).get();
+        if (!us.exists) continue;
+        const S = us.data() || {}, logs = S.logs || {};
+        let at = 0;
+        for (let i = 0; i < 7; i++) if (((logs[diasAntes(L.dia, i)]) || []).length) at++;
+        if (!at) continue;
+        const nome = String(S.name || '').trim().split(' ')[0].slice(0, 20);
+        const title = '📊 ' + (nome ? nome + ', sua' : 'Sua') + ' semana no MAXWS está pronta!';
+        const body = (at === 7 ? 'Você marcou hábitos nos 7 dias da semana 🔥 ' : `Você marcou hábitos em ${at} de 7 dias${at >= 5 ? ' 🔥' : ''}. `) +
+          'Toque para ver seu card animado e postar nos Stories.';
+        n += await enviar(deps, uid, tokens, title, body, 'maxws-resumo', URL + '?card=semana');
+      } catch (e) { console.log('falha no resumo da semana para', uid, e && e.message); }
+    }
+  } catch (e) { console.log('falha no resumo da semana', e && e.message); }
+  if (n) console.log('MAXWS: resumos da semana enviados', n);
   return n;
 }
 
@@ -582,6 +640,7 @@ async function run(deps) {
   await testes(deps, meta);
   await fimTeste(deps);
   await fimPremium(deps);
+  const nr = await resumoSemana(deps, meta);
   try { await caktoSync(deps); } catch (e) { console.log('falha na Cakto', e && e.message); }
   const atual = Math.floor(now / STEP) * STEP;
   let ultimo = typeof meta.ate === 'number' ? meta.ate : atual - STEP;
@@ -649,13 +708,13 @@ async function run(deps) {
     }
   }
 
-  await metaRef.set({ ate: atual, sg, tr: meta.tr, t: now, n: enviados + na, err: ERRS }, { merge: true });
+  await metaRef.set({ ate: atual, sg, tr: meta.tr, t: now, n: enviados + na + nr, err: ERRS }, { merge: true });
   console.log(`MAXWS: fatias ${slots.length}, contas lidas ${lidos}, notificações enviadas ${enviados + na}`);
   if (Object.keys(ERRS).length) console.log('MAXWS: falhas de envio', JSON.stringify(ERRS));
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { run, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
