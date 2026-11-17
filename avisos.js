@@ -445,7 +445,7 @@ async function caktoSync(deps) {
 async function limparConta(deps, id) {
   const { db, auth } = deps;
   if (auth) { try { await auth.deleteUser(id); } catch (e) { if (!/user-not-found/.test(String(e && e.code))) console.log('falha ao apagar login', e && e.code); } }
-  for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'opinioes/' + id, 'resumo/' + id, 'fotoAviso/' + id]) { try { await db.doc(p).delete(); } catch (e) { /* segue */ } }
+  for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'opinioes/' + id, 'resumo/' + id, 'fotoAviso/' + id, 'liga/' + id]) { try { await db.doc(p).delete(); } catch (e) { /* segue */ } }
   await tiraParcerias(db, id);
   try {
     const cs = await db.collection('clas').where('m', 'array-contains', id).get();
@@ -548,7 +548,7 @@ async function expulsoes(deps) {
     for (const d of q.docs) {
       const id = d.id;
       if (auth) { try { await auth.deleteUser(id); } catch (e) { if (!/user-not-found/.test(String(e && e.code))) console.log('falha ao apagar login', e && e.code); } }
-      for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'resumo/' + id, 'fotoAviso/' + id]) { try { await db.doc(p).delete(); } catch (e) { } }
+      for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'resumo/' + id, 'fotoAviso/' + id, 'liga/' + id]) { try { await db.doc(p).delete(); } catch (e) { } }
       await tiraParcerias(db, id);
       try {
         const cs = await db.collection('clas').where('m', 'array-contains', id).get();
@@ -566,6 +566,106 @@ async function expulsoes(deps) {
   } catch (e) { console.log('falha nas expulsões', e && e.message); }
   if (n) console.log('MAXWS: contas expulsas', n);
   return n;
+}
+
+// ---------- v50: 🏆 ligas semanais ----------
+// Toda segunda (horário de Brasília) fecha a semana: em cada grupo os 5 primeiros com XP sobem de liga,
+// os 5 últimos (e quem não fez XP) descem. Depois monta os grupos novos (até 30 pessoas) só com quem
+// marcou hábito nos últimos 14 dias. Durante a semana, de hora em hora, coloca quem começou a marcar (lendo só quem mexeu no app).
+const LIGAS = 5, LG_MAX = 30;
+const diasDepois = (dia, n) => diasAntes(dia, -n);
+function segundaSP(now) { const L = horaLocal('America/Sao_Paulo', now); return diasAntes(L.dia, (L.dow + 6) % 7); }
+function xpSemana(days, s) { let x = 0; for (let i = 0; i < 7; i++) x += +((days || {})[diasDepois(s, i)] || 0); return x; }
+function hashTxt(t) { let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return h; }
+async function ligas(deps, meta) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  meta = meta || {};
+  const s = segundaSP(now);
+  const virada = meta.lgs !== s;
+  if (!virada && typeof meta.lgh === 'number' && now - meta.lgh < 60 * 60000) return { fechou: 0, grupos: 0, novos: 0 };
+  await db.doc('meta/avisos').set({ lgs: s, lgh: now }, { merge: true });
+  const out = { fechou: 0, grupos: 0, novos: 0 };
+  try {
+    let hid = [];
+    try { const c = await db.doc('config/premio').get(); hid = ((c.exists && c.data()) || {}).hid || []; } catch (e) { /* segue */ }
+    const rk = {}, lg = {}, mudou = new Set();
+    if (virada) {
+      (await db.collection('rank').get()).docs.forEach(d => { if (!hid.includes(d.id)) rk[d.id] = d.data() || {}; });
+      (await db.collection('liga').get()).docs.forEach(d => { lg[d.id] = d.data() || {}; });
+    } else {
+      // durante a semana só olha quem mexeu no app desde a última procura
+      const desde = (typeof meta.lgh === 'number' ? meta.lgh : now - 60 * 60000) - 10 * 60000;
+      for (const d of (await db.collection('rank').where('u', '>', desde).get()).docs) {
+        if (hid.includes(d.id)) continue;
+        rk[d.id] = d.data() || {};
+        const l = await db.doc('liga/' + d.id).get();
+        if (l.exists) lg[d.id] = l.data() || {};
+      }
+    }
+    const nome = id => String((rk[id] || {}).name || 'Alguém').slice(0, 40);
+    if (virada) {
+      // 1) fecha a semana anterior
+      if (meta.lgs) {
+        const gs = (await db.collection('ligas').where('s', '==', meta.lgs).get()).docs;
+        for (const g of gs) {
+          const G = g.data() || {}, lv = +G.lv || 0;
+          if (G.s !== meta.lgs) continue;
+          const L = (G.m || []).filter(id => rk[id]).map(id => ({ id, x: xpSemana(rk[id].days, meta.lgs) })).sort((a, b) => b.x - a.x);
+          const n = L.length, k = Math.min(5, Math.floor(n / 3));
+          L.forEach((e, i) => {
+            let sub = 0;
+            if (i < k && e.x > 0) sub = lv < LIGAS - 1 ? 1 : 0;
+            else if ((i >= n - k || e.x === 0) && lv > 0) sub = -1;
+            lg[e.id] = Object.assign({}, lg[e.id], { lv: lv + sub, res: { s: meta.lgs, pos: i + 1, n, sub, lv, x: e.x } });
+            mudou.add(e.id);
+            out.fechou++;
+          });
+        }
+      }
+      // 2) grupos da semana nova
+      const hoje = horaLocal('America/Sao_Paulo', now).dia;
+      const ativos = Object.keys(rk).filter(id => { for (let i = 0; i < 14; i++) if (+((rk[id].days || {})[diasAntes(hoje, i)] || 0) > 0) return true; return false; });
+      for (let lv = 0; lv < LIGAS; lv++) {
+        const ids = ativos.filter(id => (+(lg[id] || {}).lv || 0) === lv).sort((a, b) => hashTxt(a + s) - hashTxt(b + s));
+        if (!ids.length) continue;
+        const ng = Math.ceil(ids.length / LG_MAX);
+        for (let gi = 0; gi < ng; gi++) {
+          const m = ids.filter((_, i) => i % ng === gi), nm = {};
+          m.forEach(id => { nm[id] = nome(id); });
+          const gid = s + '_' + lv + '_' + gi;
+          await db.doc('ligas/' + gid).set({ s, lv, m, nm, t: now });
+          m.forEach(id => { lg[id] = Object.assign({}, lg[id], { lv, g: gid, s }); mudou.add(id); });
+          out.grupos++;
+        }
+      }
+    } else {
+      // 3) durante a semana: entra quem começou a marcar hábito e ainda não tem grupo
+      const novos = Object.keys(rk).filter(id => (lg[id] || {}).s !== s && xpSemana(rk[id].days, s) > 0);
+      if (novos.length) {
+        const gs = (await db.collection('ligas').where('s', '==', s).get()).docs.map(d => Object.assign({ id: d.id }, d.data())).filter(g => g.s === s);
+        for (const id of novos) {
+          const lv = +(lg[id] || {}).lv || 0;
+          const doLv = gs.filter(g => (+g.lv || 0) === lv);
+          let g = doLv.filter(x => (x.m || []).length < LG_MAX).sort((a, b) => (a.m || []).length - (b.m || []).length)[0];
+          if (g) {
+            g.m = (g.m || []).concat(id); g.nm = Object.assign({}, g.nm, { [id]: nome(id) });
+            await db.doc('ligas/' + g.id).set({ m: g.m, nm: g.nm }, { merge: true });
+          } else {
+            let gi = doLv.length; while (gs.some(x => x.id === s + '_' + lv + '_' + gi)) gi++;
+            g = { id: s + '_' + lv + '_' + gi, s, lv, m: [id], nm: { [id]: nome(id) }, t: now };
+            await db.doc('ligas/' + g.id).set({ s, lv, m: g.m, nm: g.nm, t: now });
+            gs.push(g);
+          }
+          lg[id] = Object.assign({}, lg[id], { lv, g: g.id, s }); mudou.add(id);
+          out.novos++;
+        }
+      }
+    }
+    for (const id of mudou) await db.doc('liga/' + id).set(lg[id]);
+  } catch (e) { console.log('falha nas ligas', e && e.message); }
+  if (out.fechou || out.grupos || out.novos) console.log('MAXWS: ligas', JSON.stringify(out));
+  return out;
 }
 
 // ---------- v48: 📷 aviso para colocar a foto de perfil ----------
@@ -736,6 +836,7 @@ async function run(deps) {
   const nr = await resumoSemana(deps, meta);
   const np = await parcerias(deps);
   const nf = await fotoAviso(deps, meta);
+  await ligas(deps, meta);
   try { await caktoSync(deps); } catch (e) { console.log('falha na Cakto', e && e.message); }
   const atual = Math.floor(now / STEP) * STEP;
   let ultimo = typeof meta.ate === 'number' ? meta.ate : atual - STEP;
@@ -809,7 +910,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { run, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
