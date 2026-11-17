@@ -838,6 +838,9 @@ function avisoFin(S, hoje) {
       if (vencDe(b.dia, ym) === dia && !((b.pg || {})[ym])) L.push(`${txt(b.e, 4) || '🧾'} ${txt(b.n, 30) || 'Conta'} vence ${quando} (${moedaBR(b.v)})`);
     }
   }
+  for (const rd of (Array.isArray(S.rend) ? S.rend : [])) {
+    if (rd && rendaData(rd, hoje.slice(0, 7)) === hoje) L.push(`${txt(rd.e, 4) || '💼'} Hoje é dia de pagamento: ${txt(rd.n, 30) || 'Salário'} 🎉`);
+  }
   for (const s of (Array.isArray(S.subs) ? S.subs : [])) {
     if (vencDe(s.dia, am.slice(0, 7)) === am) L.push(`${txt(s.e, 4) || '📺'} ${txt(s.n, 30) || 'Assinatura'} renova amanhã (${moedaBR(s.v)})`);
   }
@@ -849,6 +852,31 @@ function avisoFin(S, hoje) {
   if (!L.length) return null;
   if (L.length === 1) return { title: L[0], body: 'Toque para ver nas Finanças do MAXWS.' };
   return { title: '🧾 ' + L.length + ' lembretes de dinheiro hoje', body: L.slice(0, 3).join(' · ') + (L.length > 3 ? ' · e mais ' + (L.length - 3) : '') };
+}
+
+// ---------- v54: 💼 dia do pagamento e 💸 lembrete da noite ----------
+// t 'u' = N-ésimo dia útil (segunda a sexta, sem feriados); senão, dia fixo do mês
+function rendaData(rd, ym) {
+  if (rd.t !== 'u') return vencDe(rd.dia, ym);
+  const [y, m] = ym.split('-').map(Number), dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  let n = 0, last = '';
+  for (let d = 1; d <= dim; d++) {
+    const w = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    if (w === 0 || w === 6) continue;
+    n++; last = ym + '-' + String(d).padStart(2, '0');
+    if (n >= +rd.dia) return last;
+  }
+  return last;
+}
+function gastoNoite(S, hoje) {
+  const g = S.gn || {};
+  const on = typeof g.on === 'boolean' ? g.on : (Array.isArray(S.fin) && S.fin.length > 0);
+  if (!on) return null;
+  const n = (Array.isArray(S.fin) ? S.fin : []).filter(x => x && x.t === 'd' && x.d === hoje).length;
+  return {
+    title: '💸 Quanto você gastou hoje?',
+    body: n ? `Você anotou ${n} ${n === 1 ? 'gasto' : 'gastos'} hoje. Faltou alguma coisa? Toque e confira.` : 'Ainda não tem nenhum gasto anotado hoje. Toque e anote em 5 segundos 😉'
+  };
 }
 
 async function run(deps) {
@@ -919,6 +947,9 @@ async function run(deps) {
           } else if (it.id === '_fi') {
             const m = avisoFin(S, hoje);
             if (m) enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws-fin');
+          } else if (it.id === '_gn') {
+            const m = gastoNoite(S, hoje);
+            if (m) enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws-gasto', URL + '?acao=gasto');
           } else if (it.id === '_sono') {
             const so = S.sono || {};
             if (!so.on || !/^\d\d:\d\d$/.test(so.h || '')) continue;
@@ -957,7 +988,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { run, avisoFin, descHoje, vencDe, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
