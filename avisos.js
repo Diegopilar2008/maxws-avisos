@@ -817,6 +817,40 @@ async function resumoSemana(deps, meta) {
   return n;
 }
 
+// ---------- v53: 😴 dia de descanso, 🧾 contas/assinaturas/cobranças e 🌙 hora de dormir ----------
+function descHoje(S, hoje, dow) {
+  if ((S.dark || {}).st === 'on') return false;  // no Modo Dark não tem descanso
+  let r = null;
+  for (const e of (Array.isArray(S.desc) ? S.desc : [])) if (e && e.ini <= hoje) r = e;
+  return !!r && typeof r.d === 'number' && r.d === dow;
+}
+const moedaBR = v => 'R$ ' + (Math.round((+v || 0) * 100) / 100).toFixed(2).replace('.', ',');
+function vencDe(dia, ym) {
+  const [y, m] = ym.split('-').map(Number);
+  const dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  return ym + '-' + String(Math.min(+dia || 1, dim)).padStart(2, '0');
+}
+function avisoFin(S, hoje) {
+  const am = diasAntes(hoje, -1), L = [], txt = (x, n) => String(x || '').slice(0, n);
+  for (const b of (Array.isArray(S.bills) ? S.bills : [])) {
+    for (const [dia, quando] of [[hoje, 'hoje'], [am, 'amanhã']]) {
+      const ym = dia.slice(0, 7);
+      if (vencDe(b.dia, ym) === dia && !((b.pg || {})[ym])) L.push(`${txt(b.e, 4) || '🧾'} ${txt(b.n, 30) || 'Conta'} vence ${quando} (${moedaBR(b.v)})`);
+    }
+  }
+  for (const s of (Array.isArray(S.subs) ? S.subs : [])) {
+    if (vencDe(s.dia, am.slice(0, 7)) === am) L.push(`${txt(s.e, 4) || '📺'} ${txt(s.n, 30) || 'Assinatura'} renova amanhã (${moedaBR(s.v)})`);
+  }
+  for (const x of (Array.isArray(S.deb) ? S.deb : [])) {
+    if (x.ok || !x.ate) continue;
+    if (x.q === 'me' && x.ate === hoje) L.push(`🤝 Dia de cobrar ${txt(x.n, 20)} (${moedaBR(x.v)})`);
+    if (x.q === 'eu' && (x.ate === hoje || x.ate === am)) L.push(`🤝 Pagar ${txt(x.n, 20)} ${x.ate === hoje ? 'hoje' : 'amanhã'} (${moedaBR(x.v)})`);
+  }
+  if (!L.length) return null;
+  if (L.length === 1) return { title: L[0], body: 'Toque para ver nas Finanças do MAXWS.' };
+  return { title: '🧾 ' + L.length + ' lembretes de dinheiro hoje', body: L.slice(0, 3).join(' · ') + (L.length > 3 ? ' · e mais ' + (L.length - 3) : '') };
+}
+
 async function run(deps) {
   const { db } = deps;
   const now = deps.now || Date.now();
@@ -857,12 +891,16 @@ async function run(deps) {
       const S = us.data() || {}, hoje = diaLocal(p.tz, now), feitos = (S.logs || {})[hoje] || [], habs = S.habits || [];
       const dow = new Date(hoje + 'T12:00:00Z').getUTCDay();
       const naData = h => !Array.isArray(h.d) || !h.d.length || h.d.length >= 7 || h.d.includes(dow);
-      const ativos = habs.filter(h => (!h.c || h.c <= hoje) && naData(h));
+      const descanso = descHoje(S, hoje, dow);
+      const ativos = descanso ? [] : habs.filter(h => (!h.c || h.c <= hoje) && naData(h));
       const pend = ativos.filter(h => !feitos.includes(h.id));
       for (const it of itens) {
         try {
           if (it.id === '_bd' || it.id === '_bt' || it.id === '_bn') {
-            const m = saudacao(it.id, S, hoje, ativos.length - pend.length, ativos.length);
+            if (descanso && it.id === '_bt') continue;
+            const m = descanso && it.id === '_bd'
+              ? { title: '☀️ Bom dia' + (primeiroNome(S.name) ? ', ' + primeiroNome(S.name) : '') + '! Hoje é seu dia de descanso 😴', body: 'Sua sequência está protegida. Aproveite para recarregar as energias 💜' }
+              : saudacao(it.id, S, hoje, ativos.length - pend.length, ativos.length);
             enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws' + it.id);
           } else if (String(it.id).startsWith('_dk')) {
             const D = S.dark || {};
@@ -871,15 +909,24 @@ async function run(deps) {
             enviados += await enviar(deps, uid, tokens, '🖤 Você jurou. Levanta e cumpre.',
               (n === 1 ? 'Falta 1 hábito' : `Faltam ${n} hábitos`) + ` hoje. O toque de recolher é às ${D.rec || '23:00'}.`, 'maxws-dark');
           } else if (it.id === '_ina') {
+            if (descanso) continue;
             const m = sumiu(S, hoje, p.tz, now);
             if (m) enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws-sumiu');
           } else if (it.id === '_dia') {
             if (!pend.length) continue;
             const n = pend.length;
             enviados += await enviar(deps, uid, tokens, '🔥 Ainda dá tempo!', (n === 1 ? 'Falta 1 hábito' : `Faltam ${n} hábitos`) + ' hoje. Não quebre sua sequência!', 'maxws-dia');
+          } else if (it.id === '_fi') {
+            const m = avisoFin(S, hoje);
+            if (m) enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws-fin');
+          } else if (it.id === '_sono') {
+            const so = S.sono || {};
+            if (!so.on || !/^\d\d:\d\d$/.test(so.h || '')) continue;
+            enviados += await enviar(deps, uid, tokens, '🌙 Daqui a 30 minutos é sua hora de dormir',
+              'Às ' + so.h + '. Desliga as telas aos poucos e descansa: amanhã tem mais 💪', 'maxws-sono');
           } else {
             const h = habs.find(x => String(x.id) === String(it.id));
-            if (!h || feitos.includes(h.id) || !naData(h)) continue;
+            if (!h || feitos.includes(h.id) || !naData(h) || descanso) continue;
             enviados += await enviar(deps, uid, tokens, '⏰ ' + (h.e ? h.e + ' ' : '') + h.n, 'Hora do seu hábito! Toque para marcar como feito.', 'maxws-' + h.id);
           }
         } catch (e) { console.log('falha ao enviar para', uid, e && e.message); }
@@ -910,7 +957,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { run, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, avisoFin, descHoje, vencDe, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
