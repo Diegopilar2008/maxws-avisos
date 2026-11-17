@@ -445,7 +445,7 @@ async function caktoSync(deps) {
 async function limparConta(deps, id) {
   const { db, auth } = deps;
   if (auth) { try { await auth.deleteUser(id); } catch (e) { if (!/user-not-found/.test(String(e && e.code))) console.log('falha ao apagar login', e && e.code); } }
-  for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'opinioes/' + id, 'resumo/' + id]) { try { await db.doc(p).delete(); } catch (e) { /* segue */ } }
+  for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'opinioes/' + id, 'resumo/' + id, 'fotoAviso/' + id]) { try { await db.doc(p).delete(); } catch (e) { /* segue */ } }
   await tiraParcerias(db, id);
   try {
     const cs = await db.collection('clas').where('m', 'array-contains', id).get();
@@ -548,7 +548,7 @@ async function expulsoes(deps) {
     for (const d of q.docs) {
       const id = d.id;
       if (auth) { try { await auth.deleteUser(id); } catch (e) { if (!/user-not-found/.test(String(e && e.code))) console.log('falha ao apagar login', e && e.code); } }
-      for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'resumo/' + id]) { try { await db.doc(p).delete(); } catch (e) { } }
+      for (const p of ['users/' + id + '/x/foto', 'users/' + id, 'rank/' + id, 'push/' + id, 'signups/' + id, 'refs/' + id, 'resumo/' + id, 'fotoAviso/' + id]) { try { await db.doc(p).delete(); } catch (e) { } }
       await tiraParcerias(db, id);
       try {
         const cs = await db.collection('clas').where('m', 'array-contains', id).get();
@@ -565,6 +565,46 @@ async function expulsoes(deps) {
     }
   } catch (e) { console.log('falha nas expulsões', e && e.message); }
   if (n) console.log('MAXWS: contas expulsas', n);
+  return n;
+}
+
+// ---------- v48: 📷 aviso para colocar a foto de perfil ----------
+// Uma vez só por pessoa: conta com 2 dias ou mais e sem foto, entre 12h e 14h no horário dela.
+async function fotoAviso(deps, meta) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  meta = meta || {};
+  const sp = horaLocal('America/Sao_Paulo', now);
+  if (sp.h < 11 || sp.h >= 16) return 0;
+  if (typeof meta.fat === 'number' && now - meta.fat < 30 * 60000) return 0;
+  await db.doc('meta/avisos').set({ fat: now }, { merge: true });
+  let n = 0;
+  try {
+    const ps = await db.collection('push').get();
+    for (const d of ps.docs) {
+      const p = d.data() || {}, uid = d.id, tokens = (p.tk || []).filter(Boolean);
+      if (!tokens.length) continue;
+      const L = horaLocal(p.tz, now);
+      if (L.h < 12 || L.h >= 14) continue;
+      try {
+        const fr = db.doc('fotoAviso/' + uid);
+        if ((await fr.get()).exists) continue;
+        const rk = await db.doc('rank/' + uid).get();
+        if (rk.exists && (rk.data() || {}).ft) { await fr.set({ st: 'tem', t: now }); continue; }
+        const us = await db.doc('users/' + uid).get();
+        if (!us.exists) continue;
+        const S = us.data() || {};
+        if (S.ft) { await fr.set({ st: 'tem', t: now }); continue; }
+        const acc = +S.acc || 0;
+        if (!acc || now - acc < 2 * 864e5) continue;
+        await fr.set({ st: 'env', t: now });  // marca antes: nunca manda 2 vezes
+        const nome = String(S.name || '').trim().split(' ')[0].slice(0, 20);
+        n += await enviar(deps, uid, tokens, '📷 ' + (nome ? nome + ', coloque' : 'Coloque') + ' sua foto no MAXWS',
+          'Com foto, seus amigos te reconhecem no ranking e no parceiro de disciplina. Leva 10 segundos!', 'maxws-foto', URL + '?foto=perfil');
+      } catch (e) { console.log('falha no aviso da foto para', uid, e && e.message); }
+    }
+  } catch (e) { console.log('falha no aviso da foto', e && e.message); }
+  if (n) console.log('MAXWS: avisos da foto de perfil', n);
   return n;
 }
 
@@ -695,6 +735,7 @@ async function run(deps) {
   await fimPremium(deps);
   const nr = await resumoSemana(deps, meta);
   const np = await parcerias(deps);
+  const nf = await fotoAviso(deps, meta);
   try { await caktoSync(deps); } catch (e) { console.log('falha na Cakto', e && e.message); }
   const atual = Math.floor(now / STEP) * STEP;
   let ultimo = typeof meta.ate === 'number' ? meta.ate : atual - STEP;
@@ -762,13 +803,13 @@ async function run(deps) {
     }
   }
 
-  await metaRef.set({ ate: atual, sg, tr: meta.tr, t: now, n: enviados + na + nr + np, err: ERRS }, { merge: true });
+  await metaRef.set({ ate: atual, sg, tr: meta.tr, t: now, n: enviados + na + nr + np + nf, err: ERRS }, { merge: true });
   console.log(`MAXWS: fatias ${slots.length}, contas lidas ${lidos}, notificações enviadas ${enviados + na}`);
   if (Object.keys(ERRS).length) console.log('MAXWS: falhas de envio', JSON.stringify(ERRS));
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { run, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
