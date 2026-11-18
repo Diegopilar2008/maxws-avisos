@@ -3,7 +3,7 @@
 'use strict';
 
 const STEP = 5 * 60000;          // fatias de 5 minutos
-const MAX_ATRASO = 45 * 60000;   // se o GitHub atrasar, ainda manda avisos de até 45 min atrás
+const MAX_ATRASO = 120 * 60000;  // se o GitHub atrasar, ainda manda avisos de até 2 h atrás
 const URL = 'https://max-ws.web.app/';
 const TOKEN_RUIM = /registration-token-not-registered|invalid-registration-token|invalid-argument|mismatched-credential/;
 
@@ -67,12 +67,12 @@ const fraseDo = (tipo, hoje) => {
 const primeiroNome = n => String(n || '').trim().split(/\s+/)[0].slice(0, 20);
 
 // texto das mensagens de bom dia, boa tarde e boa noite
-function saudacao(id, S, hoje, feitosN, total) {
+function saudacao(id, S, hoje, feitosN, total, prox) {
   const nome = primeiroNome(S.name), oi = nome ? ', ' + nome : '';
   if (id === '_bd') {
     return {
       title: '☀️ Bom dia' + oi + '! Bora evoluir 💪',
-      body: (total ? `Hoje são ${total} ${total === 1 ? 'hábito' : 'hábitos'} te esperando. ` : '') + fraseDo('bd', hoje)
+      body: (total ? `Hoje são ${total} ${total === 1 ? 'hábito' : 'hábitos'} te esperando. ` : '') + (prox ? `Comece por ${prox}. ` : '') + fraseDo('bd', hoje)
     };
   }
   if (id === '_bt') {
@@ -879,27 +879,35 @@ function gastoNoite(S, hoje) {
   };
 }
 
+// ---------- v55: hábito recomendado nos lembretes (qual fazer agora) ----------
+function recomenda(pend, n) {
+  if (!pend.length) return '';
+  const h = pend[Math.abs(+n || 0) % pend.length];
+  return (h.e ? h.e + ' ' : '') + String(h.n || 'seu hábito').slice(0, 40);
+}
+function lembreteHabito(id, S, pend, feitosN, total, n) {
+  if (!pend.length) return null;
+  const nome = primeiroNome(S.name), hb = recomenda(pend, n), k = pend.length;
+  if (id === '_n1') return { title: '💪 Bora de ' + hb + '?', body: (k === 1 ? 'É o último hábito de hoje. ' : `Faltam ${k} hábitos hoje. `) + 'Começa por esse e o resto fica mais fácil.' };
+  if (id === '_n2') return { title: '⚡ ' + (nome ? nome + ', a' : 'A') + 'inda dá pra fazer ' + hb, body: `Você já fez ${feitosN} de ${total} hoje. Mais um e sua sequência 🔥 agradece.` };
+  return { title: '⏰ Que tal ' + hb + ' agora?', body: (k === 1 ? 'Só falta esse hoje. ' : `Faltam ${k} hábitos. `) + 'Um de cada vez 💜' };
+}
+
 async function run(deps) {
   const { db } = deps;
   const now = deps.now || Date.now();
   ERRS = {};
-  await senhas(deps);
-  await expulsoes(deps);
-  await exclusoes(deps);
-  await indicacoes(deps);
-  const na = await avisosTodos(deps);
+  // uma tarefa com erro não pode travar as notificações (antes, um erro em qualquer uma parava tudo)
+  const seguro = async (nome, f) => {
+    try { return (await f()) || 0; } catch (e) {
+      console.log('falha em ' + nome + ':', e && e.message);
+      ERRS['tarefa ' + nome] = (ERRS['tarefa ' + nome] || 0) + 1;
+      return 0;
+    }
+  };
   const metaRef = db.doc('meta/avisos');
   const ms = await metaRef.get();
   const meta = (ms.exists && ms.data()) || {};
-  await premioMes(deps, meta);
-  await testes(deps, meta);
-  await fimTeste(deps);
-  await fimPremium(deps);
-  const nr = await resumoSemana(deps, meta);
-  const np = await parcerias(deps);
-  const nf = await fotoAviso(deps, meta);
-  await ligas(deps, meta);
-  try { await caktoSync(deps); } catch (e) { console.log('falha na Cakto', e && e.message); }
   const atual = Math.floor(now / STEP) * STEP;
   let ultimo = typeof meta.ate === 'number' ? meta.ate : atual - STEP;
   if (atual - ultimo > MAX_ATRASO) ultimo = atual - MAX_ATRASO;
@@ -928,7 +936,7 @@ async function run(deps) {
             if (descanso && it.id === '_bt') continue;
             const m = descanso && it.id === '_bd'
               ? { title: '☀️ Bom dia' + (primeiroNome(S.name) ? ', ' + primeiroNome(S.name) : '') + '! Hoje é seu dia de descanso 😴', body: 'Sua sequência está protegida. Aproveite para recarregar as energias 💜' }
-              : saudacao(it.id, S, hoje, ativos.length - pend.length, ativos.length);
+              : saudacao(it.id, S, hoje, ativos.length - pend.length, ativos.length, it.id === '_bd' ? recomenda(pend, it.s) : '');
             enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws' + it.id);
           } else if (String(it.id).startsWith('_dk')) {
             const D = S.dark || {};
@@ -938,15 +946,20 @@ async function run(deps) {
               (n === 1 ? 'Falta 1 hábito' : `Faltam ${n} hábitos`) + ` hoje. O toque de recolher é às ${D.rec || '23:00'}.`, 'maxws-dark');
           } else if (it.id === '_ina') {
             if (descanso) continue;
-            const m = sumiu(S, hoje, p.tz, now);
-            if (m) enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws-sumiu');
+            let m = sumiu(S, hoje, p.tz, now), lk;
+            if (!m && (S.cfg || {}).nudge !== false) { m = lembreteHabito('_ina', S, pend, ativos.length - pend.length, ativos.length, it.s); lk = URL + '?acao=rotina'; }
+            if (m) enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws-sumiu', lk);
           } else if (it.id === '_dia') {
             if (!pend.length) continue;
             const n = pend.length;
-            enviados += await enviar(deps, uid, tokens, '🔥 Ainda dá tempo!', (n === 1 ? 'Falta 1 hábito' : `Faltam ${n} hábitos`) + ' hoje. Não quebre sua sequência!', 'maxws-dia');
+            enviados += await enviar(deps, uid, tokens, '🔥 Ainda dá tempo!', (n === 1 ? 'Falta 1 hábito' : `Faltam ${n} hábitos`) + ' hoje. Não quebre sua sequência!', 'maxws-dia', URL + '?acao=rotina');
           } else if (it.id === '_fi') {
             const m = avisoFin(S, hoje);
             if (m) enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws-fin');
+          } else if (it.id === '_n1' || it.id === '_n2') {
+            if (descanso || (S.cfg || {}).nudge === false) continue;
+            const m = lembreteHabito(it.id, S, pend, ativos.length - pend.length, ativos.length, it.s);
+            if (m) enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws' + it.id, URL + '?acao=rotina');
           } else if (it.id === '_gn') {
             const m = gastoNoite(S, hoje);
             if (m) enviados += await enviar(deps, uid, tokens, m.title, m.body, 'maxws-gasto', URL + '?acao=gasto');
@@ -965,9 +978,25 @@ async function run(deps) {
     }
   }
 
+  // 1b) demais tarefas (depois dos lembretes, que têm horário)
+  await seguro('senhas', () => senhas(deps));
+  await seguro('expulsoes', () => expulsoes(deps));
+  await seguro('exclusoes', () => exclusoes(deps));
+  await seguro('indicacoes', () => indicacoes(deps));
+  const na = await seguro('avisos', () => avisosTodos(deps));
+  await seguro('premio', () => premioMes(deps, meta));
+  await seguro('testes', () => testes(deps, meta));
+  await seguro('fimTeste', () => fimTeste(deps));
+  await seguro('fimPremium', () => fimPremium(deps));
+  const nr = await seguro('resumo', () => resumoSemana(deps, meta));
+  const np = await seguro('parcerias', () => parcerias(deps));
+  const nf = await seguro('foto', () => fotoAviso(deps, meta));
+  await seguro('ligas', () => ligas(deps, meta));
+  await seguro('cakto', () => caktoSync(deps));
+
   // 2) aviso para o dono quando alguém se cadastra
   let sg = typeof meta.sg === 'number' ? meta.sg : now;
-  if (typeof meta.sg === 'number') {
+  if (typeof meta.sg === 'number') await seguro('cadastros', async () => {
     const novos = await db.collection('signups').where('t', '>', meta.sg).get();
     if (novos.docs.length) {
       sg = Math.max(sg, ...novos.docs.map(x => +(x.data() || {}).t || 0));
@@ -980,7 +1009,7 @@ async function run(deps) {
         try { enviados += await enviar(deps, dono, tokens, title, 'Toque para ver no painel do dono.', 'maxws-cadastro'); } catch (e) { console.log('falha aviso dono', e && e.message); }
       }
     }
-  }
+  });
 
   await metaRef.set({ ate: atual, sg, tr: meta.tr, t: now, n: enviados + na + nr + np + nf, err: ERRS }, { merge: true });
   console.log(`MAXWS: fatias ${slots.length}, contas lidas ${lidos}, notificações enviadas ${enviados + na}`);
@@ -988,7 +1017,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, recomenda, lembreteHabito, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
