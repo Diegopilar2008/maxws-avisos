@@ -166,11 +166,12 @@ async function avisosTodos(deps) {
     for (const d of prontos) {
       const a = d.data() || {};
       await db.doc('avisos/' + d.id).set({ st: 'env' }, { merge: true });  // marca antes: nunca manda 2 vezes
-      const para = a.so ? alvos.filter(x => x[0] === a.so) : alvos;  // "so": teste só no celular do dono
+      const para = a.so ? alvos.filter(x => x[0] === a.so) : alvos;  // "so": só uma pessoa (teste do dono ou "chamar de volta")
+      const lk = a.lk === 'volta' ? URL + '?acao=volta' : undefined;
       let n = 0;
       for (let i = 0; i < para.length; i += 10) {
         const r = await Promise.all(para.slice(i, i + 10).map(([uid, tk]) =>
-          enviar(deps, uid, tk, String(a.ti || 'MAXWS').slice(0, 60), String(a.tx || '').slice(0, 180), 'maxws-aviso-' + d.id)
+          enviar(deps, uid, tk, String(a.ti || 'MAXWS').slice(0, 60), String(a.tx || '').slice(0, 180), 'maxws-aviso-' + d.id, lk)
             .catch(e => { console.log('falha no aviso para', uid, e && e.message); return 0; })));
         n += r.reduce((x, y) => x + y, 0);
       }
