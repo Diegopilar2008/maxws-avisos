@@ -843,7 +843,7 @@ function avisoFin(S, hoje) {
     if (rd && rendaData(rd, hoje.slice(0, 7)) === hoje) L.push(`${txt(rd.e, 4) || '💼'} Hoje é dia de pagamento: ${txt(rd.n, 30) || 'Salário'} 🎉`);
   }
   for (const s of (Array.isArray(S.subs) ? S.subs : [])) {
-    if (vencDe(s.dia, am.slice(0, 7)) === am) L.push(`${txt(s.e, 4) || '📺'} ${txt(s.n, 30) || 'Assinatura'} renova amanhã (${moedaBR(s.v)})`);
+    if (vencDe(s.dia, am.slice(0, 7)) === am && !((s.pg || {})[am.slice(0, 7)])) L.push(`${txt(s.e, 4) || '📺'} ${txt(s.n, 30) || 'Assinatura'} renova amanhã (${moedaBR(s.v)})`);
   }
   for (const x of (Array.isArray(S.deb) ? S.deb : [])) {
     if (x.ok || !x.ate) continue;
