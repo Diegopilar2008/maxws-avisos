@@ -288,6 +288,118 @@ async function pedidosSenha(deps) {
   return n;
 }
 
+// ---------- v71: 📧 chamar de volta por e-mail (o dono toca no botão; o robô manda pelo Gmail da MAXWS) ----------
+const EM_FIM = Date.UTC(2026, 11, 1, 3, 0);   // promoção até 30/11 23:59 (Brasília)
+const EM_DIA = 300;                            // no máximo 300 e-mails por dia (o Gmail grátis deixa 500)
+const EM_RODADA = 30;                          // por rodada do robô (a cada 5 minutos)
+const EM_PAUSA = 7 * 864e5;                    // quem recebeu fica 7 dias sem receber outro
+const EM_SUMIU = 3 * 864e5;                    // "sumidos": 3 dias ou mais sem abrir o app
+const emNome = n => { const p = String(n || '').trim().split(/\s+/)[0] || ''; return p ? p.charAt(0).toUpperCase() + p.slice(1).toLowerCase() : ''; };
+const emData = t => { const d = new Date(t - 3 * 3600e3); return String(d.getUTCDate()).padStart(2, '0') + '/' + String(d.getUTCMonth() + 1).padStart(2, '0'); };
+// o texto de cada modelo (o painel do dono mostra o mesmo texto na prévia)
+function emTexto(tpl, nome, ate, sair) {
+  const oi = nome ? 'Oi, ' + nome + '!' : 'Oi!';
+  const fim = '\n\nUm abraço,\nDiego · MAXWS\n\nNão quer mais receber nossos e-mails? Toque aqui: ' + sair;
+  if (tpl === 'presente') return {
+    subject: '🎁 Você ganhou 7 dias de Premium no MAXWS',
+    text: oi + '\n\nAqui é da equipe MAXWS. Vi que você criou sua conta no app e queria te chamar de volta.\n\n'
+      + 'Para isso, liberei 7 dias de Premium grátis para você, até ' + ate + '. Não precisa fazer nada: é só entrar.\n\n'
+      + 'O app também ficou melhor: o cadastro está mais rápido e, se você esquecer a senha, agora dá para recuperar pelo e-mail ou pelo WhatsApp.\n\n'
+      + 'Entre por aqui: https://max-ws.web.app\nDica: quando entrar, ative as notificações para receber os lembretes dos seus hábitos.' + fim
+  };
+  return {
+    subject: 'Seu MAXWS está te esperando (promoção até 30/11)',
+    text: oi + '\n\nAqui é da equipe MAXWS. Você criou sua conta no app e queria te avisar de uma coisa antes que acabe:\n\n'
+      + 'Até 30/11, o MAXWS completo está por R$ 9,90 (o preço normal é R$ 19,90). A partir de 1/12, volta para R$ 19,90.\n\n'
+      + 'Veja tudo o que vem no app: https://maxws-oficial.web.app\n\nJá tem conta? É só entrar com o mesmo login: https://max-ws.web.app\n\n'
+      + 'Qualquer dúvida, é só responder este e-mail.' + fim
+  };
+}
+const emToken = () => require('crypto').randomBytes(15).toString('base64').replace(/[^a-z0-9]/gi, '').toLowerCase().padEnd(20, '0').slice(0, 20);
+const emOk = e => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e) && !/@tel\.max-ws\.web\.app$/i.test(e);
+async function emailsVolta(deps) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  const q = await db.collection('emails').get();
+  const jobs = q.docs.map(d => Object.assign({ id: d.id }, d.data() || {})).filter(j => !j.st || j.st === 'enviando').sort((a, b) => (a.t || 0) - (b.t || 0));
+  // o painel mostra se o envio está ligado
+  const mr = db.doc('meta/email'), ms = await mr.get(), M = (ms.exists && ms.data()) || {};
+  const on = !!deps.mailer;
+  if (M.on !== on) await mr.set({ on, t: now }, { merge: true });
+  if (!jobs.length) return 0;
+  const job = jobs[0];
+  const jr = db.doc('emails/' + job.id);
+  if (!on) { await jr.set({ st: 'sem_config', fim: now }, { merge: true }); return 0; }
+  if (job.tpl !== 'presente' && job.tpl !== 'promo') { await jr.set({ st: 'erro', err: 'modelo inválido', fim: now }, { merge: true }); return 0; }
+  if (job.tpl === 'promo' && now >= EM_FIM) { await jr.set({ st: 'erro', err: 'a promoção acabou em 30/11', fim: now }, { merge: true }); return 0; }
+  // limite do dia
+  const hoje = emData(now) + '/' + new Date(now - 3 * 3600e3).getUTCFullYear();
+  let feitosHoje = M.d === hoje ? +M.n || 0 : 0;
+  const cota = Math.min(EM_RODADA, EM_DIA - feitosHoje);
+  if (cota <= 0) { await jr.set({ st: 'enviando', esp: 'limite do dia (300). Continua amanhã.' }, { merge: true }); return 0; }
+  // quem recebe: tem e-mail de login, não é dono/sócio, não saiu da lista, não recebeu nos últimos 7 dias, não é Premium
+  const donos = new Set(await donosIds(db));
+  const todos = async c => { const m = {}; (await db.collection(c).get()).docs.forEach(d => { m[d.id] = d.data() || {}; }); return m; };
+  const [SG, EXP, LOG, SAIR, PREM] = [await todos('signups'), await todos('expulsos'), await todos('emlog'), await todos('emsair'), await todos('premium')];
+  const ids = Object.keys(SG).filter(id => !donos.has(id) && !EXP[id]);
+  const mails = {};
+  if (deps.auth && typeof deps.auth.getUsers === 'function') {
+    for (let i = 0; i < ids.length; i += 100) {
+      const r = await deps.auth.getUsers(ids.slice(i, i + 100).map(uid => ({ uid })));
+      (r.users || []).forEach(u => { mails[u.uid] = String(u.email || '').toLowerCase(); });
+    }
+  } else if (deps.auth && typeof deps.auth.getUser === 'function') {
+    for (const id of ids) { try { const u = await deps.auth.getUser(id); mails[id] = String((u && u.email) || '').toLowerCase(); } catch (e) { /* conta apagada */ } }
+  } else ids.forEach(id => { mails[id] = String(SG[id].email || '').toLowerCase(); });
+  const fila = [];
+  let tot = 0;
+  for (const id of ids) {
+    const email = mails[id] || '';
+    if (!emOk(email)) continue;   // sem login com e-mail (número, sem login ou conta apagada)
+    const L = LOG[id] || {}, p = PREM[id] || null;
+    if (L.k && SAIR[L.k]) continue;
+    if (p && (p.plan === 'dono' || p.plan === 'socio' || (p.plan === 'fundador' && !p.until))) continue;
+    if (p && (p.tier || 'premium') === 'premium' && p.until && p.until > now && !(L.j === job.id)) continue;
+    if (L.j === job.id) { tot++; continue; }                 // já recebeu (ou falhou) neste envio
+    if ((L.t && now - L.t < EM_PAUSA)) continue;             // recebeu outro há pouco
+    const us = await db.doc('users/' + id).get();
+    if (!us.exists) continue;
+    const U = us.data() || {};
+    if (job.pub !== 'todos' && now - (+U.vis || +U.acc || 0) < EM_SUMIU) continue;
+    tot++;
+    fila.push({ id, email, nome: emNome(SG[id].name || U.name), L, p });
+  }
+  let env = 0, fal = 0, err = '';
+  for (const r of fila.slice(0, cota)) {
+    const k = r.L.k || emToken();
+    const sair = URL + '?sair=' + k;
+    const ate = emData(now + 7 * 864e5);
+    const m = emTexto(job.tpl, r.nome, ate, sair);
+    try {
+      await deps.mailer.send({ to: r.email, subject: m.subject, text: m.text, headers: { 'List-Unsubscribe': '<' + sair + '>' } });
+    } catch (e) {
+      const c = String((e && (e.code || e.responseCode)) || '') + ' ' + String((e && e.message) || '');
+      if (/EAUTH|535|534|Invalid login|Username and Password/i.test(c)) { await jr.set({ st: 'erro', err: 'o Gmail recusou a senha de app. Rode o email.sh de novo.', fim: now }, { merge: true }); return env; }
+      fal++; err = c.slice(0, 120);
+      await db.doc('emlog/' + r.id).set({ f: now, j: job.id, k }, { merge: true });   // não tenta de novo neste envio
+      continue;
+    }
+    env++;
+    await db.doc('emlog/' + r.id).set({ t: now, tpl: job.tpl, k, j: job.id }, { merge: true });
+    if (job.tpl === 'presente') {
+      await db.doc('premium/' + r.id).set({ tier: 'premium', plan: 'bonus', until: now + 7 * 864e5, name: String((r.p && r.p.name) || r.nome || '').slice(0, 40), t: now }, { merge: true });
+    }
+  }
+  feitosHoje += env;
+  await mr.set({ on, d: hoje, n: feitosHoje, t: now }, { merge: true });
+  const resto = fila.length - env - fal;
+  const up = { st: resto > 0 ? 'enviando' : 'ok', env: (+job.env || 0) + env, fal: (+job.fal || 0) + fal, tot: Math.max(+job.tot || 0, tot), esp: '' };
+  if (err) up.err = err;
+  if (resto <= 0) up.fim = now;
+  await jr.set(up, { merge: true });
+  return env;
+}
+
 // indique um amigo: depois de 3 dias de uso do amigo, os dois ganham 7 dias de Premium
 async function indicacoes(deps) {
   const { db } = deps;
@@ -1063,6 +1175,7 @@ async function run(deps) {
   await seguro('exclusoes', () => exclusoes(deps));
   await seguro('indicacoes', () => indicacoes(deps));
   await seguro('pedidos de senha', () => pedidosSenha(deps));
+  await seguro('e-mails de volta', () => emailsVolta(deps));
   const na = await seguro('avisos', () => avisosTodos(deps));
   await seguro('premio', () => premioMes(deps, meta));
   await seguro('testes', () => testes(deps, meta));
@@ -1097,7 +1210,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { pedidosSenha, contaDoTel, run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, recomenda, lembreteHabito, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { emailsVolta, emTexto, emNome, emData, pedidosSenha, contaDoTel, run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, recomenda, lembreteHabito, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
@@ -1106,7 +1219,15 @@ if (require.main === module) {
   const { getAuth } = require('firebase-admin/auth');
   if (!process.env.FIREBASE_SA) { console.error('Falta o segredo FIREBASE_SA no GitHub.'); process.exit(1); }
   initializeApp({ credential: cert(JSON.parse(process.env.FIREBASE_SA)) });
-  run({ db: getFirestore(), fcm: getMessaging(), auth: getAuth(), FieldValue })
+  // v71: e-mails pelo Gmail da MAXWS (senha de app guardada nos segredos do GitHub)
+  let mailer = null;
+  if (process.env.GMAIL_USER && process.env.GMAIL_PASS) {
+    try {
+      const tr = require('nodemailer').createTransport({ host: 'smtp.gmail.com', port: 465, secure: true, pool: true, maxConnections: 1, auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS } });
+      mailer = { send: m => tr.sendMail({ from: { name: 'MAXWS', address: process.env.GMAIL_USER }, replyTo: process.env.GMAIL_USER, to: m.to, subject: m.subject, text: m.text, headers: m.headers }) };
+    } catch (e) { console.log('sem nodemailer: e-mails desligados', e && e.message); }
+  }
+  run({ db: getFirestore(), fcm: getMessaging(), auth: getAuth(), FieldValue, mailer })
     .then(() => process.exit(0))
     .catch(e => { console.error(e); process.exit(1); });
 }
