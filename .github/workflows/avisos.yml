@@ -28,12 +28,15 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: npm-firebase-admin-13
+          key: npm-firebase-admin-13-nodemailer
       - run: npm init -y >/dev/null && npm install --no-audit --no-fund firebase-admin@13
+      - run: npm install --no-audit --no-fund nodemailer || echo "nodemailer não instalou (os e-mails ficam para a próxima rodada)"
       - run: npm audit --omit=dev --audit-level=high || echo "npm audit encontrou avisos acima (o robô continua rodando)"
       - run: node avisos.js
         env:
           FIREBASE_SA: ${{ secrets.FIREBASE_SA }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
 
   manter-ativo:
     # o GitHub desliga robôs de repositórios parados há 60 dias; um registro por semana evita isso
