@@ -224,13 +224,49 @@ async function premioMes(deps, meta) {
   return n;
 }
 
-// v68: avisa o dono quando alguém pede senha nova (conta com número)
+// v69: acha a conta do número direto no login (com ou sem o 9 na frente). null = não tem conta; erro de rede = tenta de novo
+async function contaDoTel(deps, tel) {
+  const { auth } = deps;
+  if (!auth || typeof auth.getUserByEmail !== 'function') return null;
+  const d = String(tel || '').replace(/\D/g, '').replace(/^55(?=\d{10,11}$)/, '');
+  if (d.length < 10) return null;
+  const vs = [d];
+  if (d.length === 11 && d[2] === '9') vs.push(d.slice(0, 2) + d.slice(3));
+  if (d.length === 10) vs.push(d.slice(0, 2) + '9' + d.slice(2));
+  for (const v of vs) {
+    try {
+      const u = await auth.getUserByEmail('55' + v + '@tel.max-ws.web.app');
+      if (u && u.uid) return { uid: u.uid, tl: '55' + v };
+    } catch (e) {
+      if (!/user-not-found/.test(String(e && (e.code || e.message)))) throw e;
+    }
+  }
+  return null;
+}
+// avisa o dono quando alguém pede senha nova (conta com número) e deixa a conta achada no pedido
 async function pedidosSenha(deps) {
   const { db } = deps;
   const now = deps.now || Date.now();
   let n = 0;
   const q = await db.collection('pedsenha').get();
-  const novos = q.docs.filter(d => !(d.data() || {}).av);
+  const docs = q.docs.filter(d => /^55\d{10,11}$/.test(d.id));
+  for (const d of docs) {
+    if ((d.data() || {}).ck) continue;
+    let c;
+    try { c = await contaDoTel(deps, d.id); } catch (e) { console.log('falha ao procurar a conta do número', e && (e.code || e.message)); continue; }
+    const up = { ck: now };
+    if (c) {
+      const ud = await db.doc('users/' + c.uid).get();
+      const u = (ud.exists && ud.data()) || {};
+      Object.assign(up, { uid: c.uid, tl: c.tl, nm: String(u.name || '').slice(0, 40) });
+      // o dono não via essa conta na lista: corrige o aviso de cadastro
+      const sr = db.doc('signups/' + c.uid), sd = await sr.get();
+      if (!sd.exists) await sr.set({ name: up.nm, av: String(u.av || '').slice(0, 4), email: '', tel: c.tl, via: 'tel', t: +u.acc || now });
+      else if (!(sd.data() || {}).tel) await sr.set({ tel: c.tl }, { merge: true });
+    }
+    await db.doc('pedsenha/' + d.id).set(up, { merge: true });
+  }
+  const novos = docs.filter(d => !(d.data() || {}).av);
   if (!novos.length) return 0;
   const t = novos.length === 1 ? '🔑 Alguém pediu senha nova' : '🔑 ' + novos.length + ' pedidos de senha nova';
   for (const dono of await donosIds(db)) {
@@ -1049,7 +1085,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { pedidosSenha, run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, recomenda, lembreteHabito, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { pedidosSenha, contaDoTel, run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, recomenda, lembreteHabito, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
