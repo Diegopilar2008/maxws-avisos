@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: maxws-avisos
@@ -17,6 +17,8 @@ jobs:
   avisos:
     if: github.event.schedule != '41 4 * * 1'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +29,8 @@ jobs:
         with:
           path: ~/.npm
           key: npm-firebase-admin-13
-      - run: npm install --no-save --no-audit --no-fund firebase-admin@13
+      - run: npm init -y >/dev/null && npm install --no-audit --no-fund firebase-admin@13
+      - run: npm audit --omit=dev --audit-level=high || echo "npm audit encontrou avisos acima (o robô continua rodando)"
       - run: node avisos.js
         env:
           FIREBASE_SA: ${{ secrets.FIREBASE_SA }}
@@ -36,6 +39,8 @@ jobs:
     # o GitHub desliga robôs de repositórios parados há 60 dias; um registro por semana evita isso
     if: github.event.schedule == '41 4 * * 1'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - run: |
