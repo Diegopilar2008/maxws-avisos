@@ -172,7 +172,7 @@ async function avisosTodos(deps) {
       for (let i = 0; i < para.length; i += 10) {
         const r = await Promise.all(para.slice(i, i + 10).map(([uid, tk]) =>
           enviar(deps, uid, tk, String(a.ti || 'MAXWS').slice(0, 60), String(a.tx || '').slice(0, 180), 'maxws-aviso-' + d.id, lk)
-            .catch(e => { console.log('falha no aviso para', uid, e && e.message); return 0; })));
+            .catch(e => { console.log('falha no aviso para uma pessoa', e && e.message); return 0; })));
         n += r.reduce((x, y) => x + y, 0);
       }
       await db.doc('avisos/' + d.id).set({ st: 'ok', n, fim: Date.now() }, { merge: true });
@@ -236,8 +236,17 @@ async function indicacoes(deps) {
       const u = await db.doc('users/' + r.id).get();
       const logs = (u.exists && (u.data() || {}).logs) || {};
       if (Object.keys(logs).filter(k => (logs[k] || []).length).length < 3) continue;
+      if (deps.auth && typeof deps.auth.getUser === 'function') {
+        let au = null;
+        try { au = await deps.auth.getUser(r.id); } catch (e) { continue; }
+        const criado = Date.parse((au && au.metadata && au.metadata.creationTime) || '') || now;
+        if (!au || !(au.providerData || []).length || now - criado < 3 * 864e5) continue;
+      }
+      const ganhos = await db.collection('refs').where('by', '==', R.by).where('st', '==', 'ok').get();
+      const noMes = ganhos.docs.filter(d => ((d.data() || {}).tok || 0) > now - 30 * 864e5).length;
       for (const id of [R.by, r.id]) {
         if (!id) continue;
+        if (id === R.by && noMes >= 5) continue;
         const ps = await db.doc('premium/' + id).get();
         const p = (ps.exists && ps.data()) || null;
         if (p && (p.plan === 'dono' || p.plan === 'socio' || (p.plan === 'fundador' && !p.until))) continue;
@@ -247,7 +256,7 @@ async function indicacoes(deps) {
         const tk = ((pd.exists && (pd.data() || {}).tk) || []).filter(Boolean);
         try { n += await enviar(deps, id, tk, '🎁 Você ganhou 7 dias de Premium!', id === r.id ? 'Presente da sua indicação no MAXWS. Aproveite! ⭐' : 'Seu amigo ' + String(R.name || '').slice(0, 30) + ' já está firme no MAXWS. Valeu por indicar! ⭐', 'maxws-ref'); } catch (e) { console.log('falha aviso indicação', e && e.message); }
       }
-      await db.doc('refs/' + r.id).set({ st: 'ok' }, { merge: true });
+      await db.doc('refs/' + r.id).set({ st: 'ok', tok: now }, { merge: true });
     }
   } catch (e) { console.log('falha nas indicações', e && e.message); }
   return n;
@@ -317,9 +326,9 @@ async function uidDoEmail(deps, email) {
   const { db, auth } = deps;
   if (!email) return null;
   if (auth) { try { const u = await auth.getUserByEmail(email); if (u && u.uid) return u.uid; } catch (e) { /* sem login com esse e-mail */ } }
-  for (const [col, campo] of [['signups', 'email'], ['users', 'mail']]) {
-    try { const q = await db.collection(col).where(campo, '==', email).limit(1).get(); if (q.docs.length) return q.docs[0].id; } catch (e) { /* segue */ }
-  }
+  // v66: não usa mais o e-mail do perfil/cadastro (qualquer um pode digitar o e-mail de outra pessoa).
+  // Sem login com esse e-mail, a venda fica pendente para o dono liberar no painel.
+  void db;
   return null;
 }
 async function tokensDe(db, id) {
@@ -350,6 +359,11 @@ async function caktoSync(deps) {
   const f = deps.fetch || fetch;
   const cs = await db.doc('dono/cakto').get();
   const cfg = (cs.exists && cs.data()) || {};
+  try {
+    const st = await db.doc('dono/caktost').get();
+    if (cfg.id && cfg.sec && !st.exists) await db.doc('dono/caktost').set({ id: 'ok', t: now });
+    if (!(cfg.id && cfg.sec) && st.exists) await db.doc('dono/caktost').delete();
+  } catch (e) { /* segue */ }
   if (!cfg.id || !cfg.sec) return null;
   const mr = await db.doc('meta/cakto').get();
   const M = (mr.exists && mr.data()) || {};
@@ -702,7 +716,7 @@ async function fotoAviso(deps, meta) {
         const nome = String(S.name || '').trim().split(' ')[0].slice(0, 20);
         n += await enviar(deps, uid, tokens, '📷 ' + (nome ? nome + ', coloque' : 'Coloque') + ' sua foto no MAXWS',
           'Com foto, seus amigos te reconhecem no ranking e no parceiro de disciplina. Leva 10 segundos!', 'maxws-foto', URL + '?foto=perfil');
-      } catch (e) { console.log('falha no aviso da foto para', uid, e && e.message); }
+      } catch (e) { console.log('falha no aviso da foto', e && e.message); }
     }
   } catch (e) { console.log('falha no aviso da foto', e && e.message); }
   if (n) console.log('MAXWS: avisos da foto de perfil', n);
