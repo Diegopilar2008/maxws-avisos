@@ -250,8 +250,16 @@ async function pedidosSenha(deps) {
   let n = 0;
   const q = await db.collection('pedsenha').get();
   const docs = q.docs.filter(d => /^55\d{10,11}$/.test(d.id));
+  const confere = !!(deps.auth && typeof deps.auth.getUserByEmail === 'function');
+  const achou = {};
   for (const d of docs) {
-    if ((d.data() || {}).ck) continue;
+    const x = d.data() || {};
+    if (x.ck) {
+      achou[d.id] = !!x.uid;
+      // v70: número sem conta (engano ou spam) some sozinho em 24 h
+      if (!x.uid && now - x.ck > 864e5) { await db.doc('pedsenha/' + d.id).delete(); achou[d.id] = 'apagado'; }
+      continue;
+    }
     let c;
     try { c = await contaDoTel(deps, d.id); } catch (e) { console.log('falha ao procurar a conta do número', e && (e.code || e.message)); continue; }
     const up = { ck: now };
@@ -265,8 +273,12 @@ async function pedidosSenha(deps) {
       else if (!(sd.data() || {}).tel) await sr.set({ tel: c.tl }, { merge: true });
     }
     await db.doc('pedsenha/' + d.id).set(up, { merge: true });
+    achou[d.id] = !!c;
   }
-  const novos = docs.filter(d => !(d.data() || {}).av);
+  // v70: só avisa o dono de pedido com conta de verdade (sem robô de spam no celular dele)
+  const pend = docs.filter(d => !(d.data() || {}).av && achou[d.id] !== 'apagado' && (!confere || d.id in achou));
+  const novos = confere ? pend.filter(d => achou[d.id] === true) : pend;
+  for (const d of pend) if (!novos.includes(d)) await db.doc('pedsenha/' + d.id).set({ av: now }, { merge: true });
   if (!novos.length) return 0;
   const t = novos.length === 1 ? '🔑 Alguém pediu senha nova' : '🔑 ' + novos.length + ' pedidos de senha nova';
   for (const dono of await donosIds(db)) {
