@@ -224,6 +224,22 @@ async function premioMes(deps, meta) {
   return n;
 }
 
+// v68: avisa o dono quando alguém pede senha nova (conta com número)
+async function pedidosSenha(deps) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  let n = 0;
+  const q = await db.collection('pedsenha').get();
+  const novos = q.docs.filter(d => !(d.data() || {}).av);
+  if (!novos.length) return 0;
+  const t = novos.length === 1 ? '🔑 Alguém pediu senha nova' : '🔑 ' + novos.length + ' pedidos de senha nova';
+  for (const dono of await donosIds(db)) {
+    try { n += await enviar(deps, dono, await tokensDe(db, dono), t, 'Abra o painel do dono para criar a senha e mandar no WhatsApp.', 'maxws-senha'); } catch (e) { console.log('falha aviso de senha', e && e.message); }
+  }
+  for (const d of novos) await db.doc('pedsenha/' + d.id).set({ av: now }, { merge: true });
+  return n;
+}
+
 // indique um amigo: depois de 3 dias de uso do amigo, os dois ganham 7 dias de Premium
 async function indicacoes(deps) {
   const { db } = deps;
@@ -998,6 +1014,7 @@ async function run(deps) {
   await seguro('expulsoes', () => expulsoes(deps));
   await seguro('exclusoes', () => exclusoes(deps));
   await seguro('indicacoes', () => indicacoes(deps));
+  await seguro('pedidos de senha', () => pedidosSenha(deps));
   const na = await seguro('avisos', () => avisosTodos(deps));
   await seguro('premio', () => premioMes(deps, meta));
   await seguro('testes', () => testes(deps, meta));
@@ -1032,7 +1049,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, recomenda, lembreteHabito, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { pedidosSenha, run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, recomenda, lembreteHabito, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
