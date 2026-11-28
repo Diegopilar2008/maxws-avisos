@@ -468,6 +468,20 @@ async function testesPush(deps) {
   return n;
 }
 
+// ---------- v73: 📅 datas importantes (cai hoje? todo mês, todo ano ou uma vez) ----------
+function dataCai(x, dia) {
+  if (!x || !/^\d{4}-\d\d-\d\d$/.test(x.d || '') || !String(x.n || '').trim() || dia < x.d) return false;
+  if (x.r === 'a') {
+    if (x.d.slice(5) === dia.slice(5)) return true;
+    const y = +dia.slice(0, 4), bis = y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+    return x.d.slice(5) === '02-29' && dia.slice(5) === '02-28' && !bis;
+  }
+  if (x.r === 'm') {
+    const [y, m, d] = dia.split('-').map(Number), nd = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    return d === Math.min(+x.d.slice(8, 10), nd);
+  }
+  return x.d === dia;
+}
 // indique um amigo: depois de 3 dias de uso do amigo, os dois ganham 7 dias de Premium
 async function indicacoes(deps) {
   const { db } = deps;
@@ -1227,6 +1241,15 @@ async function run(deps) {
             if (!so.on || !/^\d\d:\d\d$/.test(so.h || '')) continue;
             enviados += await enviar(deps, uid, tokens, '🌙 Daqui a 30 minutos é sua hora de dormir',
               'Às ' + so.h + '. Desliga as telas aos poucos e descansa: amanhã tem mais 💪', 'maxws-sono');
+          } else if (String(it.id).startsWith('_dt')) {
+            // v73: datas importantes no horário escolhido (no dia e, se pediu, 1 dia antes)
+            const hh = String(it.id).slice(3), hr = hh.slice(0, 2) + ':' + hh.slice(2, 4), amanha = diasAntes(hoje, -1);
+            for (const x of (Array.isArray(S.datas) ? S.datas : []).slice(0, 20)) {
+              if (!x || (/^\d\d:\d\d$/.test(x.h || '') ? x.h : '09:00') !== hr) continue;
+              const nm = (x.e ? x.e + ' ' : '') + String(x.n || '').slice(0, 40);
+              if (dataCai(x, hoje)) enviados += await enviar(deps, uid, tokens, '📅 Hoje: ' + nm, 'Hoje é um dia importante pra você 💜', 'maxws-data-' + String(x.id || '').slice(0, 20));
+              else if (x.a && dataCai(x, amanha)) enviados += await enviar(deps, uid, tokens, '📅 Amanhã: ' + nm, 'Amanhã é um dia importante pra você. Já se prepara 💜', 'maxws-data-' + String(x.id || '').slice(0, 20));
+            }
           } else {
             const h = habs.find(x => String(x.id) === String(it.id));
             if (!h || feitos.includes(h.id) || !naData(h) || descanso) continue;
@@ -1280,7 +1303,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { caixa, relatorioMes, testesPush, emailsVolta, emTexto, emNome, emData, pedidosSenha, contaDoTel, run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, recomenda, lembreteHabito, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { dataCai, caixa, relatorioMes, testesPush, emailsVolta, emTexto, emNome, emData, pedidosSenha, contaDoTel, run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, recomenda, lembreteHabito, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
