@@ -110,7 +110,18 @@ async function donosIds(db) {
   }
   return [...new Set(ids)];
 }
-async function enviar({ fcm, db, FieldValue }, uid, tokens, title, body, tag, link) {
+// v72: cada aviso também fica na central de notificações do app (o sino), mesmo se o celular não receber
+async function caixa(db, uid, title, body, tag, link, now) {
+  try {
+    const r = db.doc('caixa/' + uid), s = await r.get();
+    const L = (((s.exists && (s.data() || {}).L) || [])).filter(x => x && typeof x === 'object');
+    L.unshift({ ti: String(title || '').slice(0, 80), tx: String(body || '').slice(0, 200), t: now, tg: String(tag || '').slice(0, 30), lk: String(link || '').slice(0, 120) });
+    await r.set({ L: L.slice(0, 30), u: now });
+  } catch (e) { /* a central é extra: nunca trava o aviso */ }
+}
+async function enviar(dp, uid, tokens, title, body, tag, link) {
+  const { fcm, db, FieldValue } = dp;
+  await caixa(db, uid, title, body, tag, link, dp.now || Date.now());
   if (!tokens.length) return 0;
   const r = await fcm.sendEachForMulticast({
     tokens,
@@ -204,8 +215,9 @@ async function premioMes(deps, meta) {
       for (const w of P.g.slice(0, 3)) {
         const lugar = ['1º', '2º', '3º'][(w.p || 1) - 1] || 'top 3';
         try {
+          const ganho = String(P.mes) >= '2026-12' && (w.p || 1) > 1 ? '7 dias de Premium' : '1 mês de Premium';   // v72: a partir de dezembro, 2º e 3º ganham 7 dias
           n += await enviar(deps, w.id, await tokens(w.id), '🏆 Você ganhou o prêmio do mês!',
-            `Você ficou em ${lugar} no ranking de ${MESES[+P.mes.slice(5, 7) - 1] || P.mes} e ganhou 1 mês de Premium. Parabéns! ⭐`, 'maxws-premio');
+            `Você ficou em ${lugar} no ranking de ${MESES[+P.mes.slice(5, 7) - 1] || P.mes} e ganhou ${ganho}. Parabéns! ⭐`, 'maxws-premio');
         } catch (e) { console.log('falha no aviso do prêmio', e && e.message); }
       }
       upd.pw = P.mes;
@@ -398,6 +410,62 @@ async function emailsVolta(deps) {
   if (resto <= 0) up.fim = now;
   await jr.set(up, { merge: true });
   return env;
+}
+
+// ---------- v72: 📊 relatório do mês (aviso no dia 1º) e 🧪 notificação de teste ----------
+async function relatorioMes(deps, meta) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  meta = meta || {};
+  const sp = horaLocal('America/Sao_Paulo', now);
+  const dd = sp.dia.slice(8, 10);
+  if (dd !== '01' && !(dd === '02' && sp.h < 3)) return 0;   // dia 1º (com folga para outros fusos)
+  if (typeof meta.rmt === 'number' && now - meta.rmt < 20 * 60000) return 0;
+  await db.doc('meta/avisos').set({ rmt: now }, { merge: true });
+  meta.rmt = now;
+  let n = 0;
+  try {
+    const ps = await db.collection('push').get();
+    for (const d of ps.docs) {
+      const p = d.data() || {}, uid = d.id, tokens = (p.tk || []).filter(Boolean);
+      if (!tokens.length) continue;
+      const L = horaLocal(p.tz, now);
+      if (L.dia.slice(8, 10) !== '01' || L.h < 10 || L.h >= 22) continue;   // às 10 h do dia 1º, na hora da pessoa
+      const ym = mesAnterior(L.dia);
+      try {
+        const rf = db.doc('relmes/' + uid), rs = await rf.get();
+        if (rs.exists && (rs.data() || {}).m === ym) continue;
+        await rf.set({ m: ym, t: now });   // marca antes: nunca manda 2 vezes no mesmo mês
+        const us = await db.doc('users/' + uid).get();
+        if (!us.exists) continue;
+        const S = us.data() || {};
+        const tem = (Array.isArray(S.fin) ? S.fin : []).some(x => x && typeof x.d === 'string' && x.d.slice(0, 7) === ym);
+        if (!tem) continue;
+        const nome = String(S.name || '').trim().split(' ')[0].slice(0, 20);
+        const mes = MESES[+ym.slice(5, 7) - 1] || ym;
+        n += await enviar(deps, uid, tokens, '📊 ' + (nome ? nome + ', seu' : 'Seu') + ' relatório de ' + mes + ' chegou',
+          'Veja quanto você gastou, quanto sobrou e para onde foi o dinheiro no mês.', 'maxws-relatorio', URL + '?card=relatorio');
+      } catch (e) { console.log('falha no relatório do mês para uma pessoa', e && e.message); }
+    }
+  } catch (e) { console.log('falha no relatório do mês', e && e.message); }
+  if (n) console.log('MAXWS: relatórios do mês enviados', n);
+  return n;
+}
+async function testesPush(deps) {
+  const { db } = deps;
+  const now = deps.now || Date.now();
+  let n = 0;
+  const q = await db.collection('pnteste').get();
+  for (const d of q.docs) {
+    const x = d.data() || {};
+    try {
+      if (now - (+x.t || 0) < 864e5) {
+        n += await enviar(deps, d.id, await tokensDe(db, d.id), '🧪 Teste do MAXWS', 'Chegou! As notificações do robô estão funcionando neste celular.', 'maxws-teste');
+      }
+    } catch (e) { console.log('falha no teste de notificação', e && e.message); }
+    await db.doc('pnteste/' + d.id).delete();
+  }
+  return n;
 }
 
 // indique um amigo: depois de 3 dias de uso do amigo, os dois ganham 7 dias de Premium
@@ -1182,6 +1250,8 @@ async function run(deps) {
   await seguro('fimTeste', () => fimTeste(deps));
   await seguro('fimPremium', () => fimPremium(deps));
   const nr = await seguro('resumo', () => resumoSemana(deps, meta));
+  await seguro('relatório do mês', () => relatorioMes(deps, meta));
+  await seguro('teste de notificação', () => testesPush(deps));
   const np = await seguro('parcerias', () => parcerias(deps));
   const nf = await seguro('foto', () => fotoAviso(deps, meta));
   await seguro('ligas', () => ligas(deps, meta));
@@ -1210,7 +1280,7 @@ async function run(deps) {
   return { slots, enviados, lidos, ate: atual, sg, err: ERRS };
 }
 
-module.exports = { emailsVolta, emTexto, emNome, emData, pedidosSenha, contaDoTel, run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, recomenda, lembreteHabito, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
+module.exports = { caixa, relatorioMes, testesPush, emailsVolta, emTexto, emNome, emData, pedidosSenha, contaDoTel, run, avisoFin, descHoje, vencDe, rendaData, gastoNoite, recomenda, lembreteHabito, ligas, segundaSP, xpSemana, fotoAviso, parcerias, resumoSemana, horaLocal, exclusoes, fimTeste, fimPremium, liberarCompra, testes, caktoSync, planoDaVenda, senhas, expulsoes, avisosTodos, premioMes, indicacoes, mesAnterior, slotOf, diaLocal, saudacao, sumiu, FRASES };
 
 if (require.main === module) {
   const { initializeApp, cert } = require('firebase-admin/app');
